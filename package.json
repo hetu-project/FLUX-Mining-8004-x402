@@ -1,0 +1,16 @@
+{
+  "name": "intelligence-flux-mining",
+  "version": "1.0.0",
+  "description": "JavaScript integration for Intelligence Money (FLUX) PoCW mining system with ERC-8004 identity",
+  "main": "mainnet-bridge-per-epoch.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "ethers": "^6.8.1"
+  },
+  "devDependencies": {},
+  "keywords": ["blockchain", "ethereum", "pocw", "ai", "mining", "flux", "hetu", "erc-8004", "identity"],
+  "author": "HETU Project",
+  "license": "MIT"
+}
