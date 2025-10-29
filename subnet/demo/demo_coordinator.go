@@ -12,8 +12,10 @@ package demo
 
 import (
 	"fmt"
+	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/hetu-project/FLUX-Mining-8004-x402/subnet"
 	"github.com/hetu-project/FLUX-Mining-8004-x402/vlc"
 )
@@ -28,11 +30,12 @@ import (
 //   - Processes 7 predefined inputs with known expected outcomes
 //   - Demonstrates both normal processing and info request scenarios
 type DemoCoordinator struct {
-	SubnetID     string                    // Unique identifier for this demo subnet
-	Miner        *subnet.CoreMiner         // AI agent processing tasks
-	Validators   []*subnet.CoreValidator   // Quality assessment and consensus nodes
-	userInputs   []string                  // Predefined demo inputs for consistent testing
-	GraphAdapter *subnet.SubnetGraphAdapter // Graph adapter for VLC event visualization
+	SubnetID       string                      // Unique identifier for this demo subnet
+	Miner          *subnet.CoreMiner           // AI agent processing tasks
+	Validators     []*subnet.CoreValidator     // Quality assessment and consensus nodes
+	userInputs     []string                    // Predefined demo inputs for consistent testing
+	GraphAdapter   *subnet.SubnetGraphAdapter  // Graph adapter for VLC event visualization
+	PaymentCoord   *subnet.PaymentCoordinator  // x402 payment system integration
 }
 
 // NewDemoCoordinator creates a new demo coordinator with all PoC-specific logic
@@ -66,11 +69,38 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 	// Create graph adapter for visualization
 	graphAdapter := subnet.NewSubnetGraphAdapter(subnetID, 1, "subnet-coordinator")
 
+	// Initialize payment coordinator (x402 payment system)
+	fmt.Println("💰 Initializing x402 Payment System...")
+	paymentCoord, err := subnet.NewPaymentCoordinator(
+		"http://localhost:8545",
+		"contract_addresses.json",
+		"0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", // V1 Coordinator key
+	)
+	if err != nil {
+		fmt.Printf("⚠️  Payment system unavailable: %v\n", err)
+		fmt.Println("   Continuing without payment integration...")
+		paymentCoord = nil
+	} else {
+		fmt.Println("✅ Payment coordinator initialized successfully")
+		// Set payment coordinator in UI validator (validator-1)
+		validators[0].SetPaymentCoordinator(paymentCoord)
+
+		// Configure miner with payment verification (trustless operation)
+		// Miner will verify payment is locked in escrow before processing tasks
+		agentAddress := "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc" // Agent address from contract_addresses.json
+		minPayment := "10000000000000000000" // 10 AIUSD minimum (10 * 10^18 wei)
+		miner.SetPaymentVerifier(paymentCoord, agentAddress, minPayment)
+		fmt.Printf("🔐 Miner configured with payment verification\n")
+		fmt.Printf("   Agent address: %s\n", agentAddress)
+		fmt.Printf("   Minimum payment: 10 AIUSD\n")
+	}
+
 	return &DemoCoordinator{
 		SubnetID:     subnetID,
 		Miner:        miner,
 		Validators:   validators,
 		GraphAdapter: graphAdapter,
+		PaymentCoord: paymentCoord,
 		userInputs: []string{
 			"Analyze market trends for Q4",
 			"Generate summary report for project Alpha",
@@ -140,6 +170,45 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 
 	// Track user input that starts the round
 	userInputEventID := dc.GraphAdapter.TrackUserInput(requestID, input, uiValidator.GetLastMinerClock(), "")
+
+	// *** x402 PAYMENT REQUEST: Agent generates payment request for client ***
+	var paymentRequest *subnet.PaymentRequest
+	if dc.PaymentCoord != nil {
+		agentAddr := common.HexToAddress("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc")
+		paymentRequest = dc.PaymentCoord.GeneratePaymentRequest(requestID, agentAddr)
+
+		fmt.Printf("\n📋 Agent sends x402 Payment Request to Client:\n")
+		fmt.Printf("   Task ID: %s\n", paymentRequest.TaskID)
+		fmt.Printf("   Amount: %s wei (10 AIUSD)\n", paymentRequest.Amount)
+		fmt.Printf("   Agent: %s\n", paymentRequest.Agent.Address)
+		fmt.Printf("   AIUSD Token: %s\n", paymentRequest.Asset.Contract)
+		fmt.Printf("   Escrow Contract: %s\n", paymentRequest.Escrow.Contract)
+		fmt.Printf("   Deadline: %d seconds\n\n", paymentRequest.Escrow.Timeout)
+	}
+
+	// *** PAYMENT DEPOSIT TO ESCROW: Client receives payment request and deposits ***
+	if dc.PaymentCoord != nil && paymentRequest != nil {
+		fmt.Printf("💳 Client receives payment request and initiates deposit...\n")
+
+		// Client is VALIDATOR2 (Anvil account #2)
+		clientAddr := common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
+		agentAddr := common.HexToAddress(paymentRequest.Agent.Address)
+		paymentAmount := new(big.Int)
+		paymentAmount.SetString(paymentRequest.Amount, 10)
+
+		// Client deposits to escrow using client's private key
+		clientPrivateKey := "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+		err := dc.PaymentCoord.DepositPaymentWithClientSignature(
+			requestID,
+			clientAddr,
+			agentAddr,
+			paymentAmount,
+			clientPrivateKey,
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Failed to deposit payment to escrow: %v\n", err)
+		}
+	}
 
 	// Step 1: Miner processes input (Miner VLC will increment)
 	// Sync miner's clock with validator's current state first
@@ -303,10 +372,24 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 	} else {
 		consensusResult = fmt.Sprintf("REJECTED (%.2f/%.2f weight)", sharedAssessment.AcceptVotes, sharedAssessment.TotalWeight)
 		fmt.Printf("Validator consensus: %s\n", consensusResult)
-		
+
 		userAccepts = false
 		userFeedback = "No user feedback (validator rejection)"
 		finalResult = "OUTPUT REJECTED BY VALIDATORS"
+	}
+
+	// *** PAYMENT FINALIZATION: Process payment based on consensus + user acceptance ***
+	if dc.PaymentCoord != nil {
+		qualityScore := sharedAssessment.AcceptVotes / sharedAssessment.TotalWeight
+		err := uiValidator.FinalizePayment(
+			minerResponse.RequestID,
+			sharedAssessment.IsAccepted(),
+			userAccepts,
+			qualityScore,
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Payment finalization error: %v\n", err)
+		}
 	}
 
 	// *** ROUND END: Validator-1 VLC increment for final result aggregation ***

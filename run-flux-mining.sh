@@ -324,6 +324,7 @@ VALIDATOR2="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 VALIDATOR3="0x90F79bf6EB2c4f870365E785982E1f101E93b906"
 VALIDATOR4="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
 MINER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+CLIENT="$VALIDATOR2"  # Client for x402 payments (using VALIDATOR2 to match Go demo)
 
 # Determine correct forge path
 if [ -n "$SUDO_USER" ]; then
@@ -346,30 +347,53 @@ IDENTITY_RESULT=$($FORGE_PATH create contracts/8004/IdentityRegistry.sol:Identit
 IDENTITY_ADDRESS=$(echo "$IDENTITY_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
 echo "   IdentityRegistry: $IDENTITY_ADDRESS"
 
+# === Deploy AIUSD Token for x402 Payments ===
+echo "💵 Deploying AIUSD Token (x402 payment stablecoin)..."
+AIUSD_RESULT=$($FORGE_PATH create contracts/AIUSD.sol:AIUSD \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast 2>&1)
+AIUSD_ADDRESS=$(echo "$AIUSD_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
+
+# Debug: Show if AIUSD deployment failed
+if [ -z "$AIUSD_ADDRESS" ]; then
+    echo "   ❌ ERROR: AIUSD Token deployment failed!"
+    echo "$AIUSD_RESULT" | head -20
+fi
+
+echo "   AIUSD Token: $AIUSD_ADDRESS"
+
 # Register miner with ERC-8004 to get Agent ID
 echo "🆔 Registering miner with ERC-8004 identity..."
 
-# Use timeout to prevent hanging
-timeout 5 $CAST_PATH send $IDENTITY_ADDRESS "register()" \
+# Register miner and wait for transaction to complete
+REGISTER_TX=$($CAST_PATH send $IDENTITY_ADDRESS "register()" \
     --private-key $MINER_KEY \
     --rpc-url $RPC_URL \
-    --gas-limit 300000 > /tmp/register_output.txt 2>&1 &
+    --gas-limit 300000 --json 2>&1)
 
-# Wait for background process to complete or timeout
-wait $!
-REGISTER_RESULT=$?
+if echo "$REGISTER_TX" | grep -q "blockHash\|transactionHash"; then
+    echo "   ✅ Registration transaction confirmed"
 
-if [ $REGISTER_RESULT -eq 0 ]; then
-    echo "   ✅ Registration transaction sent"
-elif [ $REGISTER_RESULT -eq 124 ]; then
-    echo "   ⚠️  Registration timed out, continuing anyway"
+    # Parse the Registered event from logs to get the actual agent ID
+    # Event signature: Registered(uint256 indexed agentId, string tokenURI, address indexed owner)
+    TX_HASH=$(echo "$REGISTER_TX" | jq -r '.transactionHash' 2>/dev/null || echo "")
+
+    if [ -n "$TX_HASH" ]; then
+        # Get transaction receipt and parse logs
+        RECEIPT=$($CAST_PATH receipt $TX_HASH --rpc-url $RPC_URL --json 2>&1)
+        # The first topic after the event signature is the agentId
+        AGENT_ID_HEX=$(echo "$RECEIPT" | jq -r '.logs[0].topics[1]' 2>/dev/null || echo "0x0")
+        AGENT_ID_DEC=$((AGENT_ID_HEX))
+        echo "   Agent ID assigned: $AGENT_ID_DEC"
+    else
+        # Fallback: First registration gets ID 0 (post-increment behavior)
+        AGENT_ID_DEC="0"
+        echo "   Agent ID (assumed first registration): $AGENT_ID_DEC"
+    fi
 else
-    echo "   ⚠️  Registration may have failed, continuing"
+    echo "   ⚠️  Registration failed, using fallback ID 0"
+    # First registration in ERC-8004 gets ID 0 (_lastId++ is post-increment)
+    AGENT_ID_DEC="0"
 fi
-
-# Always use agent ID 0 for simplicity (first registration)
-AGENT_ID_DEC="0"
-echo "   Using Agent ID: $AGENT_ID_DEC"
 
 # Deploy contracts
 echo "Deploying HETU Token..."
@@ -392,6 +416,23 @@ VERIFIER_RESULT=$($FORGE_PATH create contracts/PoCWVerifier.sol:PoCWVerifier \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast 2>&1)
 VERIFIER_ADDRESS=$(echo "$VERIFIER_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
 
+echo "🔒 Deploying x402PaymentEscrow..."
+
+# Ensure AIUSD_ADDRESS is set before deploying escrow
+if [ -z "$AIUSD_ADDRESS" ]; then
+    echo "   ❌ ERROR: AIUSD_ADDRESS is not set! Cannot deploy escrow."
+    ESCROW_ADDRESS=""
+else
+    # IMPORTANT: --private-key, --rpc-url, and --broadcast must come BEFORE --constructor-args
+    # Otherwise forge parses them as constructor arguments!
+    ESCROW_RESULT=$($FORGE_PATH create contracts/x402PaymentEscrow.sol:x402PaymentEscrow \
+        --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast \
+        --constructor-args "$AIUSD_ADDRESS" 2>&1)
+    ESCROW_ADDRESS=$(echo "$ESCROW_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
+fi
+
+echo "   x402PaymentEscrow: $ESCROW_ADDRESS"
+
 # Initialize contracts (SubnetRegistry needs both HETU and Identity addresses)
 echo "Initializing contracts..."
 timeout 3 $CAST_PATH send $REGISTRY_ADDRESS "initialize(address,address)" $HETU_ADDRESS $IDENTITY_ADDRESS \
@@ -403,6 +444,16 @@ timeout 3 $CAST_PATH send $VERIFIER_ADDRESS "initialize(address,address)" $FLUX_
 timeout 3 $CAST_PATH send $FLUX_ADDRESS "setPoCWVerifier(address)" $VERIFIER_ADDRESS \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
 
+# Authorize V1 (Validator1) as coordinator in x402PaymentEscrow
+echo "Authorizing V1 as x402 payment coordinator..."
+timeout 3 $CAST_PATH send $ESCROW_ADDRESS "authorizeCoordinator(address)" $VALIDATOR1 \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ V1 Coordinator authorized successfully"
+else
+    echo "   ⚠️  Failed to authorize V1 Coordinator"
+fi
+
 # Distribute HETU and setup subnet
 echo "Setting up subnet participants..."
 timeout 3 $CAST_PATH send $HETU_ADDRESS "transfer(address,uint256)" $MINER $($CAST_PATH --to-wei 2000) \
@@ -412,6 +463,44 @@ for VALIDATOR in $VALIDATOR1 $VALIDATOR2 $VALIDATOR3 $VALIDATOR4; do
     timeout 3 $CAST_PATH send $HETU_ADDRESS "transfer(address,uint256)" $VALIDATOR $($CAST_PATH --to-wei 2000) \
         --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
 done
+
+# Bootstrap client with HETU and AIUSD for x402 payments
+echo "💵 Bootstrapping client with ETH, AIUSD and HETU..."
+# First, send some ETH to client for gas fees
+echo "   Sending 10 ETH to client..."
+timeout 3 $CAST_PATH send $CLIENT --value 10ether \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ Client funded with 10 ETH"
+else
+    echo "   ⚠️  Failed to send ETH to client"
+fi
+timeout 3 $CAST_PATH send $HETU_ADDRESS "transfer(address,uint256)" $CLIENT $($CAST_PATH --to-wei 1000) \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
+timeout 3 $CAST_PATH send $AIUSD_ADDRESS "mint(address,uint256)" $CLIENT $($CAST_PATH --to-wei 1000) \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
+echo "   Client ($CLIENT) setup complete:"
+echo "   - ETH for gas (see above)"
+echo "   - 1000 HETU tokens"
+echo "   - 1000 AIUSD tokens for task payments"
+
+echo "💵 Bootstrapping V1 Coordinator with AIUSD for demo payments..."
+timeout 3 $CAST_PATH send $AIUSD_ADDRESS "mint(address,uint256)" $VALIDATOR1 $($CAST_PATH --to-wei 100) \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
+echo "   V1 Coordinator ($VALIDATOR1) bootstrapped with:"
+echo "   - 100 AIUSD tokens for demo payment distribution"
+
+echo "🔓 Approving escrow to spend client's AIUSD..."
+# Client approves escrow contract to spend AIUSD for payments (unlimited approval)
+# Client is VALIDATOR2 (account #2): 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+CLIENT_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+timeout 3 $CAST_PATH send $AIUSD_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
+    --private-key $CLIENT_KEY --rpc-url $RPC_URL 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ Client approved escrow to spend AIUSD"
+else
+    echo "   ⚠️  Failed to approve escrow"
+fi
 
 # Approvals
 timeout 3 $CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $($CAST_PATH --to-wei 500) \
@@ -445,14 +534,19 @@ else
     exit 1
 fi
 
-# Generate contract addresses JSON for bridge and inspector
+# Generate contract addresses JSON for bridge and inspector (name -> address format)
 cat > contract_addresses.json << EOF
 {
-  "$IDENTITY_ADDRESS": "ERC-8004 Identity Registry",
-  "$HETU_ADDRESS": "HETU Token",
-  "$FLUX_ADDRESS": "Intelligence Token (FLUX)",
-  "$REGISTRY_ADDRESS": "Subnet Registry (with Identity)",
-  "$VERIFIER_ADDRESS": "Enhanced PoCW Verifier"
+  "IdentityRegistry": "$IDENTITY_ADDRESS",
+  "HETUToken": "$HETU_ADDRESS",
+  "FLUXToken": "$FLUX_ADDRESS",
+  "SubnetRegistry": "$REGISTRY_ADDRESS",
+  "PoCWVerifier": "$VERIFIER_ADDRESS",
+  "AIUSD": "$AIUSD_ADDRESS",
+  "x402PaymentEscrow": "$ESCROW_ADDRESS",
+  "Client": "$CLIENT",
+  "Agent": "$MINER",
+  "V1Coordinator": "$VALIDATOR1"
 }
 EOF
 
@@ -460,12 +554,15 @@ echo ""
 echo "📄 Contract addresses saved to contract_addresses.json"
 echo "   View in inspector at: http://localhost:3000/pocw-inspector.html"
 
-echo "✅ Mainnet contracts deployed and configured with ERC-8004 Identity"
+echo "✅ Mainnet contracts deployed and configured with ERC-8004 Identity + x402 Payments"
 echo "   🆔 Identity Registry: $IDENTITY_ADDRESS"
 echo "   🆔 Miner Agent ID: $AGENT_ID_DEC"
-echo "   HETU Token: $HETU_ADDRESS"
-echo "   FLUX Token: $FLUX_ADDRESS"  
-echo "   PoCW Verifier: $VERIFIER_ADDRESS"
+echo "   💰 HETU Token: $HETU_ADDRESS"
+echo "   ⚡ FLUX Token: $FLUX_ADDRESS"
+echo "   📋 PoCW Verifier: $VERIFIER_ADDRESS"
+echo "   💵 AIUSD Token: $AIUSD_ADDRESS"
+echo "   🔒 x402 Escrow: $ESCROW_ADDRESS"
+echo "   👤 Client Address: $CLIENT"
 
 # Helper function to format wei to FLUX tokens
 format_flux_balance() {
@@ -509,6 +606,25 @@ echo "   Balance: $V4_INITIAL_FORMATTED FLUX"
 TOTAL_SUPPLY_INITIAL=$($CAST_PATH call $FLUX_ADDRESS "totalSupply()(uint256)" --rpc-url $RPC_URL)
 TOTAL_SUPPLY_INITIAL_FORMATTED=$(format_flux_balance $TOTAL_SUPPLY_INITIAL)
 echo "📊 Total Supply: $TOTAL_SUPPLY_INITIAL_FORMATTED FLUX"
+echo ""
+
+# === AIUSD TOKEN BALANCES (x402 Payment System) ===
+echo "💵 AIUSD Token Balances (x402 Payment System)"
+echo "────────────────────────────────────────────────"
+echo "📊 Client ($CLIENT):"
+CLIENT_AIUSD=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL)
+CLIENT_AIUSD_FORMATTED=$(format_flux_balance $CLIENT_AIUSD)
+echo "   Balance: $CLIENT_AIUSD_FORMATTED AIUSD"
+
+echo "📊 Miner/Agent ($MINER):"
+MINER_AIUSD=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL)
+MINER_AIUSD_FORMATTED=$(format_flux_balance $MINER_AIUSD)
+echo "   Balance: $MINER_AIUSD_FORMATTED AIUSD"
+
+echo "📊 V1 Coordinator ($VALIDATOR1):"
+V1_AIUSD=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL)
+V1_AIUSD_FORMATTED=$(format_flux_balance $V1_AIUSD)
+echo "   Balance: $V1_AIUSD_FORMATTED AIUSD"
 echo ""
 
 # === PHASE 3: PER-EPOCH DEMONSTRATION ===
@@ -638,6 +754,24 @@ TOTAL_SUPPLY_FINAL=$($CAST_PATH call $FLUX_ADDRESS "totalSupply()(uint256)" --rp
 TOTAL_SUPPLY_FINAL_FORMATTED=$(format_flux_balance $TOTAL_SUPPLY_FINAL)
 TOTAL_MINED=$(echo "$TOTAL_SUPPLY_FINAL_FORMATTED - $TOTAL_SUPPLY_INITIAL_FORMATTED" | bc -l)
 echo "📊 Total Supply: $TOTAL_SUPPLY_FINAL_FORMATTED FLUX (+$TOTAL_MINED FLUX total mined)"
+
+echo ""
+echo "💵 Final AIUSD Token Balances (x402 Payment System)"
+echo "────────────────────────────────────────────────"
+echo "📊 Client ($CLIENT):"
+CLIENT_AIUSD_FINAL=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL)
+CLIENT_AIUSD_FINAL_FORMATTED=$(format_flux_balance $CLIENT_AIUSD_FINAL)
+echo "   Balance: $CLIENT_AIUSD_FINAL_FORMATTED AIUSD"
+
+echo "📊 Miner/Agent ($MINER):"
+MINER_AIUSD_FINAL=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL)
+MINER_AIUSD_FINAL_FORMATTED=$(format_flux_balance $MINER_AIUSD_FINAL)
+echo "   Balance: $MINER_AIUSD_FINAL_FORMATTED AIUSD"
+
+echo "📊 V1 Coordinator ($VALIDATOR1):"
+V1_AIUSD_FINAL=$($CAST_PATH call $AIUSD_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL)
+V1_AIUSD_FINAL_FORMATTED=$(format_flux_balance $V1_AIUSD_FINAL)
+echo "   Balance: $V1_AIUSD_FINAL_FORMATTED AIUSD"
 
 echo ""
 echo "🔍 What was demonstrated:"

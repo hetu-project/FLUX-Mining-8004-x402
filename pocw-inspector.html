@@ -51,6 +51,8 @@
                 <option value="identity">ERC-8004 Identity Registry</option>
                 <option value="hetu">HETU Token</option>
                 <option value="flux">Intelligence Token (FLUX)</option>
+                <option value="aiusd">AIUSD Token (x402 Payment)</option>
+                <option value="escrow">x402 Payment Escrow</option>
                 <option value="subnet">Subnet Registry</option>
                 <option value="verifier">PoCW Verifier</option>
             </select>
@@ -96,6 +98,8 @@
             "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
             "HETUToken": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
             "FLUXToken": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+            "AIUSDToken": "",  // Will be loaded from contract_addresses.json
+            "x402PaymentEscrow": "",  // Will be loaded from contract_addresses.json
             "SubnetRegistry": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
             "PoCWVerifier": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
         };
@@ -120,6 +124,18 @@
                 "function totalSupply() view returns (uint256)",
                 "function name() view returns (string)",
                 "function symbol() view returns (string)"
+            ],
+            "AIUSDToken": [
+                "function balanceOf(address) view returns (uint256)",
+                "function totalSupply() view returns (uint256)",
+                "function name() view returns (string)",
+                "function symbol() view returns (string)",
+                "function decimals() view returns (uint8)"
+            ],
+            "x402PaymentEscrow": [
+                "function getPayment(string) view returns (tuple(address,address,uint256,uint8,uint256,uint256))",
+                "function coordinator() view returns (address)",
+                "function aiusdToken() view returns (address)"
             ],
             "PoCWVerifier": [
                 "function getReputationScores(address) view returns (uint256, uint256)",
@@ -153,13 +169,25 @@
                 if (response.ok) {
                     const addresses = await response.json();
                     console.log("📄 Loaded addresses:", addresses);
-                    
-                    for (const [address, name] of Object.entries(addresses)) {
-                        if (name === "ERC-8004 Identity Registry") contractAddresses.IdentityRegistry = address;
-                        else if (name === "HETU Token") contractAddresses.HETUToken = address;
-                        else if (name === "Intelligence Token (FLUX)") contractAddresses.FLUXToken = address;
-                        else if (name.includes("Subnet Registry")) contractAddresses.SubnetRegistry = address;
-                        else if (name.includes("PoCW") && name.includes("Verifier")) contractAddresses.PoCWVerifier = address;
+
+                    // Load from new format where keys are contract names
+                    if (addresses.AIUSD) {
+                        contractAddresses.AIUSDToken = addresses.AIUSD;
+                        contractAddresses.x402PaymentEscrow = addresses.x402PaymentEscrow;
+                        contractAddresses.IdentityRegistry = addresses.IdentityRegistry || contractAddresses.IdentityRegistry;
+                        contractAddresses.HETUToken = addresses.HETUToken || contractAddresses.HETUToken;
+                        contractAddresses.FLUXToken = addresses.FLUXToken || contractAddresses.FLUXToken;
+                        contractAddresses.SubnetRegistry = addresses.SubnetRegistry || contractAddresses.SubnetRegistry;
+                        contractAddresses.PoCWVerifier = addresses.PoCWVerifier || contractAddresses.PoCWVerifier;
+                    } else {
+                        // Fallback to old format (address -> name mapping)
+                        for (const [address, name] of Object.entries(addresses)) {
+                            if (name === "ERC-8004 Identity Registry") contractAddresses.IdentityRegistry = address;
+                            else if (name === "HETU Token") contractAddresses.HETUToken = address;
+                            else if (name === "Intelligence Token (FLUX)") contractAddresses.FLUXToken = address;
+                            else if (name.includes("Subnet Registry")) contractAddresses.SubnetRegistry = address;
+                            else if (name.includes("PoCW") && name.includes("Verifier")) contractAddresses.PoCWVerifier = address;
+                        }
                     }
                     updateContractABIs();
                     console.log("✅ Updated contract addresses:", contractAddresses);
@@ -320,13 +348,23 @@
                     'identity': contractAddresses.IdentityRegistry,
                     'hetu': contractAddresses.HETUToken,
                     'flux': contractAddresses.FLUXToken,
+                    'aiusd': contractAddresses.AIUSDToken,
+                    'escrow': contractAddresses.x402PaymentEscrow,
                     'subnet': contractAddresses.SubnetRegistry,
                     'verifier': contractAddresses.PoCWVerifier
                 };
 
                 const address = addressMap[selected];
-                if (!address) {
-                    document.getElementById('contract-output').innerHTML = '<div class="error">❌ Contract not found</div>';
+                if (!address || address === '') {
+                    document.getElementById('contract-output').innerHTML = `
+                        <div class="error">❌ Contract address not found</div>
+                        <div style="margin-top: 10px;">
+                            <span class="highlight">Selected:</span> ${selected}<br>
+                            <span class="highlight">Address value:</span> ${address || 'undefined'}<br>
+                            <span class="highlight">Tip:</span> Make sure the deployment script has completed and contract_addresses.json is updated
+                        </div>
+                    `;
+                    console.log('Contract addresses:', contractAddresses);
                     return;
                 }
 
@@ -347,6 +385,8 @@
                     'identity': 'IdentityRegistry',
                     'hetu': 'HETUToken',
                     'flux': 'FLUXToken',
+                    'aiusd': 'AIUSDToken',
+                    'escrow': 'x402PaymentEscrow',
                     'verifier': 'PoCWVerifier'
                 };
 
@@ -355,7 +395,7 @@
                     const contract = new ethers.Contract(address, contractABIsByType[contractType], provider);
 
                     try {
-                        if (selected === 'identity' || selected === 'hetu' || selected === 'flux') {
+                        if (selected === 'identity' || selected === 'hetu' || selected === 'flux' || selected === 'aiusd') {
                             const name = await contract.name();
                             const symbol = await contract.symbol();
                             const totalSupply = await contract.totalSupply();
@@ -364,6 +404,15 @@
                                     <div><span class="highlight">Name:</span> ${name}</div>
                                     <div><span class="highlight">Symbol:</span> ${symbol}</div>
                                     <div><span class="highlight">Total Supply:</span> ${ethers.formatEther(totalSupply)}</div>
+                                </div>
+                            `;
+                        } else if (selected === 'escrow') {
+                            const coordinatorAddr = await contract.coordinator();
+                            const aiusdAddr = await contract.aiusdToken();
+                            output += `
+                                <div style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
+                                    <div><span class="highlight">Coordinator:</span> <span class="address">${coordinatorAddr}</span></div>
+                                    <div><span class="highlight">AIUSD Token:</span> <span class="address">${aiusdAddr}</span></div>
                                 </div>
                             `;
                         }
@@ -420,7 +469,7 @@
                     const hetuInterface = new ethers.Interface(contractABIs[hetuAddr]);
                     const hetuContract = new ethers.Contract(hetuAddr, hetuInterface, provider);
                     const hetuBalance = await hetuContract.balanceOf(address);
-                    
+
                     const fluxAddr = contractAddresses.FLUXToken;
                     const fluxInterface = new ethers.Interface(contractABIs[fluxAddr]);
                     const fluxContract = new ethers.Contract(fluxAddr, fluxInterface, provider);
@@ -431,6 +480,19 @@
                         <div style="margin-left: 20px;"><span class="highlight">HETU:</span> ${ethers.formatEther(hetuBalance)} HETU</div>
                         <div style="margin-left: 20px;"><span class="highlight">FLUX:</span> ${ethers.formatEther(fluxBalance)} FLUX</div>
                     `;
+
+                    // Add AIUSD balance if contract is loaded
+                    if (contractAddresses.AIUSDToken && contractAddresses.AIUSDToken !== '') {
+                        try {
+                            const aiusdAddr = contractAddresses.AIUSDToken;
+                            const aiusdInterface = new ethers.Interface(contractABIs[aiusdAddr]);
+                            const aiusdContract = new ethers.Contract(aiusdAddr, aiusdInterface, provider);
+                            const aiusdBalance = await aiusdContract.balanceOf(address);
+                            output += `<div style="margin-left: 20px;"><span class="highlight">AIUSD:</span> ${ethers.formatEther(aiusdBalance)} AIUSD</div>`;
+                        } catch (aiusdError) {
+                            console.log("⚠️ Could not get AIUSD balance:", aiusdError.message);
+                        }
+                    }
 
                     // Get reputation scores from PoCW contract
                     try {

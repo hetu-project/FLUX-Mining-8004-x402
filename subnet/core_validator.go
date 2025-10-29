@@ -51,7 +51,7 @@ type CoreValidator struct {
 	SubnetID string        // Subnet this validator belongs to
 	Role     ValidatorRole // Validator's specific role in the subnet
 	Weight   float64       // Voting weight in consensus (e.g., 0.25 for 1/4 validators)
-	
+
 	// VLC-based state tracking
 	MinerClock *vlc.Clock // Vector clock tracking miner's causal state
 	mu         sync.RWMutex // Protects concurrent access to validator state
@@ -62,6 +62,9 @@ type CoreValidator struct {
 	// Pluggable behavior strategies
 	qualityAssessor        QualityAssessor        // Strategy for evaluating output quality
 	userInteractionHandler UserInteractionHandler // Strategy for simulating user behavior
+
+	// x402 Payment integration
+	paymentCoordinator *PaymentCoordinator // Handles AIUSD and escrow interactions
 }
 
 // NewCoreValidator creates a new generic validator instance with specified parameters.
@@ -92,6 +95,11 @@ func (v *CoreValidator) SetQualityAssessor(assessor QualityAssessor) {
 // SetUserInteractionHandler sets the user interaction strategy
 func (v *CoreValidator) SetUserInteractionHandler(handler UserInteractionHandler) {
 	v.userInteractionHandler = handler
+}
+
+// SetPaymentCoordinator sets the payment coordinator for x402 payment handling
+func (v *CoreValidator) SetPaymentCoordinator(pc *PaymentCoordinator) {
+	v.paymentCoordinator = pc
 }
 
 // ValidateSequence validates the causal ordering using Vector Logical Clocks.
@@ -276,4 +284,48 @@ func getParticipantName(id uint64) string {
 	default:
 		return fmt.Sprintf("Participant-%d", id)
 	}
+}
+
+// ========================================================================
+// x402 Payment Integration Methods
+// ========================================================================
+
+// FinalizePayment determines payment outcome based on consensus and user acceptance
+// Called after consensus is reached and user provides feedback
+func (v *CoreValidator) FinalizePayment(requestID string, consensusReached bool, userAccepted bool, qualityScore float64) error {
+	if v.paymentCoordinator == nil {
+		// Payment system not configured - skip payment finalization
+		return nil
+	}
+
+	// Update payment tracker with consensus results
+	v.paymentCoordinator.UpdatePaymentConsensus(requestID, consensusReached, qualityScore)
+	v.paymentCoordinator.UpdatePaymentUserAcceptance(requestID, userAccepted)
+
+	// Determine if payment should be released
+	if v.paymentCoordinator.ShouldReleasePayment(requestID) {
+		// Both consensus (quality > 0.5) AND user acceptance → Release payment from escrow
+		fmt.Printf("💰 Validator %s: Releasing payment from escrow for request %s (Quality: %.2f, User: accepted)\n",
+			v.ID, requestID, qualityScore)
+		// Call escrow contract to release payment to agent
+		return v.paymentCoordinator.ReleasePayment(requestID)
+	} else {
+		// Either consensus failed OR user rejected → Refund payment from escrow
+		reason := "low quality"
+		if !userAccepted {
+			reason = "user rejected"
+		}
+		fmt.Printf("↩️  Validator %s: Refunding payment from escrow for request %s (%s)\n",
+			v.ID, requestID, reason)
+		// Call escrow contract to refund payment to client
+		return v.paymentCoordinator.RefundPayment(requestID)
+	}
+}
+
+// GetPaymentStatus returns current payment status for a request
+func (v *CoreValidator) GetPaymentStatus(requestID string) *PaymentTracker {
+	if v.paymentCoordinator == nil {
+		return nil
+	}
+	return v.paymentCoordinator.GetPaymentStatus(requestID)
 }

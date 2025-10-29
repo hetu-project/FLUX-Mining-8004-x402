@@ -6,6 +6,8 @@
 package subnet
 
 import (
+	"math/big"
+
 	"github.com/hetu-project/FLUX-Mining-8004-x402/vlc"
 )
 
@@ -45,20 +47,25 @@ type SubnetMessage struct {
 // UserInputMessage represents user input to the subnet
 type UserInputMessage struct {
 	SubnetMessage
-	Input       string `json:"input"`
-	InputNumber int    `json:"input_number"`
+	Input              string                `json:"input"`
+	InputNumber        int                   `json:"input_number"`
+	PaymentAuth        *PaymentAuthorization `json:"payment_auth,omitempty"`        // Payment signature (if responding to 402)
+	IsPaymentResponse  bool                  `json:"is_payment_response,omitempty"` // True if this includes payment
 }
 
 // MinerResponseMessage represents a miner's response to user input or additional information.
 // Contains either a completed solution (OutputReady) or a request for more context (NeedMoreInfo).
 // The VLC clock enables validators to verify causal ordering of miner operations.
+// For x402 payments, can include a PaymentRequest indicating payment is required before processing.
 type MinerResponseMessage struct {
 	SubnetMessage
-	OutputType  MinerOutputType `json:"output_type"`              // Type of response (ready vs need info)
-	Output      string          `json:"output,omitempty"`          // Generated solution (if OutputReady)
-	InfoRequest string          `json:"info_request,omitempty"`    // Question for user (if NeedMoreInfo)
-	VLCClock    *vlc.Clock      `json:"vlc_clock"`                // Vector clock for causal ordering
-	InputNumber int             `json:"input_number"`              // Sequential input identifier for tracking
+	OutputType     MinerOutputType   `json:"output_type"`              // Type of response (ready vs need info)
+	Output         string            `json:"output,omitempty"`         // Generated solution (if OutputReady)
+	InfoRequest    string            `json:"info_request,omitempty"`   // Question for user (if NeedMoreInfo)
+	VLCClock       *vlc.Clock        `json:"vlc_clock"`                // Vector clock for causal ordering
+	InputNumber    int               `json:"input_number"`             // Sequential input identifier for tracking
+	PaymentRequest *PaymentRequest   `json:"payment_request,omitempty"` // x402 payment requirement (if payment needed)
+	PaymentPending bool              `json:"payment_pending,omitempty"` // True if awaiting payment before processing
 }
 
 // ValidatorVoteMessage represents validator's vote on miner output
@@ -138,3 +145,61 @@ func (qa *QualityAssessment) AddVote(weight float64, accept bool) {
 func (qa *QualityAssessment) IsAccepted() bool {
 	return qa.Consensus && qa.AcceptVotes > 0.5
 }
+
+// ============================================================================
+// x402 Payment Protocol Extensions
+// ============================================================================
+
+// PaymentRequest represents an x402 payment requirement from the agent
+type PaymentRequest struct {
+	TaskID         string   `json:"taskId"`                   // Unique task identifier (bytes32 as hex)
+	Amount         string   `json:"amount"`                   // Payment amount in AIUSD (wei format)
+	Asset          AssetInfo `json:"asset"`                   // Token information
+	Escrow         EscrowInfo `json:"escrow"`                 // Escrow contract details
+	Agent          AgentInfo `json:"agent"`                   // Agent/miner information
+	RequiresPayment bool     `json:"requires_payment"`        // Flag indicating payment is required
+}
+
+// AssetInfo describes the payment token (AIUSD)
+type AssetInfo struct {
+	Symbol   string `json:"symbol"`           // "AIUSD"
+	Contract string `json:"contract"`         // AIUSD contract address
+	Decimals int    `json:"decimals"`         // Token decimals (18)
+}
+
+// EscrowInfo describes the escrow contract details
+type EscrowInfo struct {
+	Contract string `json:"contract"`         // x402PaymentEscrow address
+	Timeout  int    `json:"timeout"`          // Timeout in seconds (60)
+}
+
+// AgentInfo describes the agent/miner
+type AgentInfo struct {
+	Address string `json:"address"`           // Miner's Ethereum address
+	AgentID string `json:"agentId"`           // ERC-8004 agent identity ID
+}
+
+// PaymentAuthorization represents the client's EIP-712 payment signature
+type PaymentAuthorization struct {
+	TaskID      string   `json:"taskId"`          // Task identifier (must match PaymentRequest)
+	From        string   `json:"from"`            // Client address
+	To          string   `json:"to"`              // Agent address
+	Amount      *big.Int `json:"amount"`          // Payment amount
+	ValidAfter  uint64   `json:"validAfter"`      // Timestamp after which valid
+	ValidBefore uint64   `json:"validBefore"`     // Timestamp before which valid
+	Nonce       string   `json:"nonce"`           // Unique nonce (bytes32 as hex)
+	V           uint8    `json:"v"`               // ECDSA signature parameter
+	R           string   `json:"r"`               // ECDSA signature parameter (bytes32 as hex)
+	S           string   `json:"s"`               // ECDSA signature parameter (bytes32 as hex)
+}
+
+// PaymentStatus tracks the state of a payment through the escrow process
+type PaymentStatus string
+
+const (
+	PaymentPending   PaymentStatus = "pending"    // Awaiting payment authorization
+	PaymentDeposited PaymentStatus = "deposited"  // Funds locked in escrow
+	PaymentReleased  PaymentStatus = "released"   // Funds transferred to agent
+	PaymentRefunded  PaymentStatus = "refunded"   // Funds returned to client
+	PaymentExpired   PaymentStatus = "expired"    // Payment timeout reached
+)

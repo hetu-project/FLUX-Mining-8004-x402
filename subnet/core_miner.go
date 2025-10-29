@@ -6,9 +6,12 @@
 package subnet
 
 import (
+	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/hetu-project/FLUX-Mining-8004-x402/vlc"
 )
 
@@ -41,7 +44,7 @@ type CoreMiner struct {
 	// Identity and network information
 	ID       string // Unique miner identifier
 	SubnetID string // Subnet this miner belongs to
-	
+
 	// VLC-based causal consistency
 	VLCClock *vlc.Clock   // Vector clock tracking logical time of operations
 	mu       sync.RWMutex // Protects concurrent access to miner state
@@ -51,6 +54,16 @@ type CoreMiner struct {
 
 	// Pluggable behavior strategy
 	taskProcessor TaskProcessor // AI/processing logic implementation
+
+	// Payment verification (optional for trustless operation)
+	paymentVerifier PaymentVerifier // Verifies payment locked in escrow before processing
+	agentAddress    string          // Agent's Ethereum address (for payment verification)
+	minPayment      string          // Minimum payment amount required (in wei)
+}
+
+// PaymentVerifier interface for verifying escrow payments before task processing
+type PaymentVerifier interface {
+	VerifyPaymentLocked(taskID string, agentAddr common.Address, minAmount *big.Int) (bool, error)
 }
 
 // NewCoreMiner creates a new generic AI miner with empty state and configuration.
@@ -75,15 +88,24 @@ func (m *CoreMiner) SetTaskProcessor(processor TaskProcessor) {
 	m.taskProcessor = processor
 }
 
+// SetPaymentVerifier configures payment verification for trustless operation
+// When set, miner will verify payment is locked in escrow before processing tasks
+func (m *CoreMiner) SetPaymentVerifier(verifier PaymentVerifier, agentAddr string, minPayment string) {
+	m.paymentVerifier = verifier
+	m.agentAddress = agentAddr
+	m.minPayment = minPayment
+}
+
 // ProcessInput processes initial user input and determines the response type.
 // This method represents the first logical operation in the PoCW protocol.
 //
-// Simplified VLC Behavior: 
+// Simplified VLC Behavior:
 //   - Miner ID = 1, Validator-1 ID = 2
 //   - Only these two participants maintain VLC clocks
 //   - Other validators (2-4) just vote without VLC tracking
 //
 // Process:
+//   0. (OPTIONAL) Verify payment locked in escrow before doing work
 //   1. Increment VLC clock for miner (ID = 1)
 //   2. Use pluggable TaskProcessor to analyze input
 //   3. Generate response with either solution (OutputReady) or info request (NeedMoreInfo)
@@ -93,6 +115,39 @@ func (m *CoreMiner) SetTaskProcessor(processor TaskProcessor) {
 func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string) *MinerResponseMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// STEP 0: Verify payment is locked in escrow (trustless operation)
+	// Agent doesn't trust validator - queries blockchain directly for cryptographic proof
+	if m.paymentVerifier != nil {
+		agentAddr := common.HexToAddress(m.agentAddress)
+		minAmount := new(big.Int)
+		minAmount.SetString(m.minPayment, 10)
+
+		verified, err := m.paymentVerifier.VerifyPaymentLocked(requestID, agentAddr, minAmount)
+		if err != nil || !verified {
+			fmt.Printf("⚠️  Miner %s: Payment verification FAILED for task %s\n", m.ID, requestID)
+			if err != nil {
+				fmt.Printf("   Error: %v\n", err)
+			}
+			fmt.Printf("   ❌ REFUSING to process task without payment proof\n")
+
+			// Return error response - no work without payment!
+			return &MinerResponseMessage{
+				SubnetMessage: SubnetMessage{
+					SubnetID:  m.SubnetID,
+					RequestID: requestID,
+					Type:      MinerResponseType,
+					Sender:    m.ID,
+					Timestamp: time.Now().Unix(),
+				},
+				VLCClock:    m.VLCClock,
+				InputNumber: inputNumber,
+				OutputType:  OutputReady,
+				Output:      fmt.Sprintf("PAYMENT_VERIFICATION_FAILED: %v", err),
+			}
+		}
+		fmt.Printf("🔐 Miner %s: Payment verified on-chain - proceeding with task\n", m.ID)
+	}
 
 	// Increment VLC clock for miner processing (miner ID = 1)
 	m.VLCClock.Inc(1)

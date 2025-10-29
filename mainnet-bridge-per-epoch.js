@@ -79,17 +79,28 @@ class PerEpochMainnetBridge {
             const addressesData = await fs.readFile(addressesPath, 'utf8');
             const addresses = JSON.parse(addressesData);
 
-            // Find contract addresses by searching for known patterns
+            // Find contract addresses - handle both old (address->name) and new (name->address) formats
             let hetuAddress, fluxAddress, registryAddress, verifierAddress;
 
-            for (const [address, name] of Object.entries(addresses)) {
-                if (name.includes('HETU Token')) hetuAddress = address;
-                else if (name.includes('Intelligence Token') || name.includes('FLUX')) fluxAddress = address;
-                else if (name.includes('Subnet Registry')) registryAddress = address;
-                else if (name.includes('Enhanced PoCW') || name.includes('Verifier')) verifierAddress = address;
+            // Check if this is the new format (keys are contract names)
+            if (addresses.HETUToken || addresses.FLUXToken) {
+                // New format: name -> address
+                hetuAddress = addresses.HETUToken;
+                fluxAddress = addresses.FLUXToken;
+                registryAddress = addresses.SubnetRegistry;
+                verifierAddress = addresses.PoCWVerifier;
+            } else {
+                // Old format: address -> name
+                for (const [address, name] of Object.entries(addresses)) {
+                    if (name.includes('HETU Token')) hetuAddress = address;
+                    else if (name.includes('Intelligence Token') || name.includes('FLUX')) fluxAddress = address;
+                    else if (name.includes('Subnet Registry')) registryAddress = address;
+                    else if (name.includes('Enhanced PoCW') || name.includes('Verifier')) verifierAddress = address;
+                }
             }
 
             if (!hetuAddress || !fluxAddress || !registryAddress || !verifierAddress) {
+                console.error('Available addresses:', addresses);
                 throw new Error('Could not find all required contract addresses');
             }
 
