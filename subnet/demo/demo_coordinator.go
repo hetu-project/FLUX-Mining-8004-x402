@@ -88,11 +88,11 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 		// Configure miner with payment verification (trustless operation)
 		// Miner will verify payment is locked in escrow before processing tasks
 		agentAddress := "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc" // Agent address from contract_addresses.json
-		minPayment := "10000000000000000000" // 10 AIUSD minimum (10 * 10^18 wei)
+		minPayment := "10000000000000000000" // 10 tokens minimum (10 * 10^18 wei)
 		miner.SetPaymentVerifier(paymentCoord, agentAddress, minPayment)
 		fmt.Printf("🔐 Miner configured with payment verification\n")
 		fmt.Printf("   Agent address: %s\n", agentAddress)
-		fmt.Printf("   Minimum payment: 10 AIUSD\n")
+		fmt.Printf("   Minimum payment: 10 %s\n", paymentCoord.GetPaymentTokenName())
 	}
 
 	return &DemoCoordinator{
@@ -179,9 +179,9 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 
 		fmt.Printf("\n📋 Agent sends x402 Payment Request to Client:\n")
 		fmt.Printf("   Task ID: %s\n", paymentRequest.TaskID)
-		fmt.Printf("   Amount: %s wei (10 AIUSD)\n", paymentRequest.Amount)
+		fmt.Printf("   Amount: %s wei (10 %s)\n", paymentRequest.Amount, paymentRequest.Asset.Symbol)
 		fmt.Printf("   Agent: %s\n", paymentRequest.Agent.Address)
-		fmt.Printf("   AIUSD Token: %s\n", paymentRequest.Asset.Contract)
+		fmt.Printf("   Payment Token (%s): %s\n", paymentRequest.Asset.Symbol, paymentRequest.Asset.Contract)
 		fmt.Printf("   Escrow Contract: %s\n", paymentRequest.Escrow.Contract)
 		fmt.Printf("   Deadline: %d seconds\n\n", paymentRequest.Escrow.Timeout)
 	}

@@ -64,7 +64,7 @@ type CoreValidator struct {
 	userInteractionHandler UserInteractionHandler // Strategy for simulating user behavior
 
 	// x402 Payment integration
-	paymentCoordinator *PaymentCoordinator // Handles AIUSD and escrow interactions
+	paymentCoordinator *PaymentCoordinator // Handles payment tokens (USDC/AIUSD) and escrow interactions
 }
 
 // NewCoreValidator creates a new generic validator instance with specified parameters.

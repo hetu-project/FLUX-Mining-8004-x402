@@ -153,18 +153,18 @@ func (qa *QualityAssessment) IsAccepted() bool {
 // PaymentRequest represents an x402 payment requirement from the agent
 type PaymentRequest struct {
 	TaskID         string   `json:"taskId"`                   // Unique task identifier (bytes32 as hex)
-	Amount         string   `json:"amount"`                   // Payment amount in AIUSD (wei format)
+	Amount         string   `json:"amount"`                   // Payment amount in payment token (wei format)
 	Asset          AssetInfo `json:"asset"`                   // Token information
 	Escrow         EscrowInfo `json:"escrow"`                 // Escrow contract details
 	Agent          AgentInfo `json:"agent"`                   // Agent/miner information
 	RequiresPayment bool     `json:"requires_payment"`        // Flag indicating payment is required
 }
 
-// AssetInfo describes the payment token (AIUSD)
+// AssetInfo describes the payment token (USDC/AIUSD)
 type AssetInfo struct {
-	Symbol   string `json:"symbol"`           // "AIUSD"
-	Contract string `json:"contract"`         // AIUSD contract address
-	Decimals int    `json:"decimals"`         // Token decimals (18)
+	Symbol   string `json:"symbol"`           // Token symbol (e.g., "USDC", "AIUSD")
+	Contract string `json:"contract"`         // Payment token contract address
+	Decimals int    `json:"decimals"`         // Token decimals (6 for USDC, 18 for AIUSD)
 }
 
 // EscrowInfo describes the escrow contract details

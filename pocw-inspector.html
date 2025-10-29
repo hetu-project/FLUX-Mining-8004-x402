@@ -51,7 +51,7 @@
                 <option value="identity">ERC-8004 Identity Registry</option>
                 <option value="hetu">HETU Token</option>
                 <option value="flux">Intelligence Token (FLUX)</option>
-                <option value="aiusd">AIUSD Token (x402 Payment)</option>
+                <option value="payment">Payment Token (USDC/AIUSD)</option>
                 <option value="escrow">x402 Payment Escrow</option>
                 <option value="subnet">Subnet Registry</option>
                 <option value="verifier">PoCW Verifier</option>
@@ -94,11 +94,12 @@
         console.log("🔍 PoCW Inspector loading...");
         
         let provider;
+        let paymentTokenName = "USDC"; // Will be loaded from contract_addresses.json (USDC or AIUSD)
         let contractAddresses = {
             "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
             "HETUToken": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
             "FLUXToken": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            "AIUSDToken": "",  // Will be loaded from contract_addresses.json
+            "PaymentToken": "",  // Will be loaded from contract_addresses.json (USDC or AIUSD)
             "x402PaymentEscrow": "",  // Will be loaded from contract_addresses.json
             "SubnetRegistry": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
             "PoCWVerifier": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
@@ -125,7 +126,7 @@
                 "function name() view returns (string)",
                 "function symbol() view returns (string)"
             ],
-            "AIUSDToken": [
+            "PaymentToken": [
                 "function balanceOf(address) view returns (uint256)",
                 "function totalSupply() view returns (uint256)",
                 "function name() view returns (string)",
@@ -135,7 +136,7 @@
             "x402PaymentEscrow": [
                 "function getPayment(string) view returns (tuple(address,address,uint256,uint8,uint256,uint256))",
                 "function coordinator() view returns (address)",
-                "function aiusdToken() view returns (address)"
+                "function paymentToken() view returns (address)"
             ],
             "PoCWVerifier": [
                 "function getReputationScores(address) view returns (uint256, uint256)",
@@ -171,14 +172,16 @@
                     console.log("📄 Loaded addresses:", addresses);
 
                     // Load from new format where keys are contract names
-                    if (addresses.AIUSD) {
-                        contractAddresses.AIUSDToken = addresses.AIUSD;
+                    if (addresses.PaymentToken) {
+                        contractAddresses.PaymentToken = addresses.PaymentToken;
+                        paymentTokenName = addresses.PaymentTokenName || "USDC";
                         contractAddresses.x402PaymentEscrow = addresses.x402PaymentEscrow;
                         contractAddresses.IdentityRegistry = addresses.IdentityRegistry || contractAddresses.IdentityRegistry;
                         contractAddresses.HETUToken = addresses.HETUToken || contractAddresses.HETUToken;
                         contractAddresses.FLUXToken = addresses.FLUXToken || contractAddresses.FLUXToken;
                         contractAddresses.SubnetRegistry = addresses.SubnetRegistry || contractAddresses.SubnetRegistry;
                         contractAddresses.PoCWVerifier = addresses.PoCWVerifier || contractAddresses.PoCWVerifier;
+                        console.log("✅ Payment token loaded:", paymentTokenName);
                     } else {
                         // Fallback to old format (address -> name mapping)
                         for (const [address, name] of Object.entries(addresses)) {
@@ -348,7 +351,7 @@
                     'identity': contractAddresses.IdentityRegistry,
                     'hetu': contractAddresses.HETUToken,
                     'flux': contractAddresses.FLUXToken,
-                    'aiusd': contractAddresses.AIUSDToken,
+                    'payment': contractAddresses.PaymentToken,
                     'escrow': contractAddresses.x402PaymentEscrow,
                     'subnet': contractAddresses.SubnetRegistry,
                     'verifier': contractAddresses.PoCWVerifier
@@ -385,7 +388,7 @@
                     'identity': 'IdentityRegistry',
                     'hetu': 'HETUToken',
                     'flux': 'FLUXToken',
-                    'aiusd': 'AIUSDToken',
+                    'payment': 'PaymentToken',
                     'escrow': 'x402PaymentEscrow',
                     'verifier': 'PoCWVerifier'
                 };
@@ -395,7 +398,7 @@
                     const contract = new ethers.Contract(address, contractABIsByType[contractType], provider);
 
                     try {
-                        if (selected === 'identity' || selected === 'hetu' || selected === 'flux' || selected === 'aiusd') {
+                        if (selected === 'identity' || selected === 'hetu' || selected === 'flux' || selected === 'payment') {
                             const name = await contract.name();
                             const symbol = await contract.symbol();
                             const totalSupply = await contract.totalSupply();
@@ -408,11 +411,11 @@
                             `;
                         } else if (selected === 'escrow') {
                             const coordinatorAddr = await contract.coordinator();
-                            const aiusdAddr = await contract.aiusdToken();
+                            const paymentTokenAddr = await contract.paymentToken();
                             output += `
                                 <div style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
                                     <div><span class="highlight">Coordinator:</span> <span class="address">${coordinatorAddr}</span></div>
-                                    <div><span class="highlight">AIUSD Token:</span> <span class="address">${aiusdAddr}</span></div>
+                                    <div><span class="highlight">Payment Token (${paymentTokenName}):</span> <span class="address">${paymentTokenAddr}</span></div>
                                 </div>
                             `;
                         }
@@ -481,16 +484,16 @@
                         <div style="margin-left: 20px;"><span class="highlight">FLUX:</span> ${ethers.formatEther(fluxBalance)} FLUX</div>
                     `;
 
-                    // Add AIUSD balance if contract is loaded
-                    if (contractAddresses.AIUSDToken && contractAddresses.AIUSDToken !== '') {
+                    // Add Payment Token balance if contract is loaded
+                    if (contractAddresses.PaymentToken && contractAddresses.PaymentToken !== '') {
                         try {
-                            const aiusdAddr = contractAddresses.AIUSDToken;
-                            const aiusdInterface = new ethers.Interface(contractABIs[aiusdAddr]);
-                            const aiusdContract = new ethers.Contract(aiusdAddr, aiusdInterface, provider);
-                            const aiusdBalance = await aiusdContract.balanceOf(address);
-                            output += `<div style="margin-left: 20px;"><span class="highlight">AIUSD:</span> ${ethers.formatEther(aiusdBalance)} AIUSD</div>`;
-                        } catch (aiusdError) {
-                            console.log("⚠️ Could not get AIUSD balance:", aiusdError.message);
+                            const paymentTokenAddr = contractAddresses.PaymentToken;
+                            const paymentTokenInterface = new ethers.Interface(contractABIs[paymentTokenAddr]);
+                            const paymentTokenContract = new ethers.Contract(paymentTokenAddr, paymentTokenInterface, provider);
+                            const paymentBalance = await paymentTokenContract.balanceOf(address);
+                            output += `<div style="margin-left: 20px;"><span class="highlight">${paymentTokenName}:</span> ${ethers.formatEther(paymentBalance)} ${paymentTokenName}</div>`;
+                        } catch (paymentError) {
+                            console.log("⚠️ Could not get payment token balance:", paymentError.message);
                         }
                     }
 

@@ -4,18 +4,18 @@ A trustless AI agent infrastructure combining **ERC-8004 decentralized identity*
 
 ## Overview
 
-This system demonstrates a **permissionless AI marketplace** where agents earn soulbound FLUX tokens through verified intelligence work and receive AIUSD payments via trustless escrow. Combines three key innovations:
+This system demonstrates a **permissionless AI marketplace** where agents earn soulbound FLUX tokens through verified intelligence work and receive stablecoin payments (USDC/AIUSD) via trustless escrow. Combines three key innovations:
 
 - **🆔 ERC-8004 Identity**: Decentralized agent registry with cryptographic verification and NFT-based identity
 - **💳 x402 Payment Protocol**: Trustless escrow with on-chain payment verification - agents verify funds before processing
 - **⛏️ Proof-of-Causal-Work**: Byzantine Fault Tolerant consensus using Vector Logical Clocks for causal ordering
 
-The **FLUX token** represents verifiable intelligence contributions and is non-transferable (soulbound) but redeemable, while **AIUSD stablecoin** enables instant, cryptographically-secured payments between clients and agents without trusted intermediaries.
+The **FLUX token** represents verifiable intelligence contributions and is non-transferable (soulbound) but redeemable, while **stablecoins (USDC by default, configurable to AIUSD)** enable instant, cryptographically-secured payments between clients and agents without trusted intermediaries.
 
 ### Key Features
 
 - 🧠 **Intelligence Mining**: Earn FLUX tokens through actual AI task completion
-- 💳 **x402 Escrow Payments**: Trustless AIUSD payments with BFT consensus-based release
+- 💳 **x402 Escrow Payments**: Trustless USDC payments with BFT consensus-based release
 - 🔗 **Vector Logical Clocks**: Causal ordering of distributed consensus events
 - 🏛️ **Byzantine Fault Tolerant**: 4-validator consensus with quality assessment
 - 💎 **Soulbound Tokens**: Non-transferable but redeemable FLUX tokens
@@ -23,6 +23,7 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 - 📊 **Real-time Visualization**: VLC event graph via Dgraph
 - ⛓️ **Blockchain Integration**: Smart contracts on Anvil/Ethereum
 - 🔒 **Smart Contract Escrow**: Automatic payment release/refund based on validator consensus
+- 💵 **Configurable Payment Token**: Use USDC (default) or AIUSD via `--payment-token` flag
 
 ## Architecture
 
@@ -81,13 +82,13 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 
 **What it does**:
 - ✅ Everything from subnet-only mode PLUS:
-- ✅ Deploys smart contracts (FLUX, AIUSD, x402PaymentEscrow, ERC-8004 Identity, etc.)
+- ✅ Deploys smart contracts (FLUX, USDC, x402PaymentEscrow, ERC-8004 Identity, etc.)
 - ✅ Real-time FLUX mining per epoch (every 3 rounds)
-- ✅ **x402 Trustless Escrow**: AIUSD payments with BFT consensus-based release/refund
+- ✅ **x402 Trustless Escrow**: USDC payments with BFT consensus-based release/refund
 - ✅ **ERC-8004 Agent Identity**: NFT-based trustless agent verification
 - ✅ Blockchain transactions with verified rewards
 - ✅ Bridge service for epoch submission
-- ✅ Complete FLUX and AIUSD balance tracking
+- ✅ Complete FLUX and USDC balance tracking
 - ✅ Demonstrates 5 successful payments + 2 refunds via escrow
 
 **Run Command**:
@@ -106,20 +107,20 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
   ```
   📋 Agent sends x402 Payment Request to Client:
      Task ID: req-subnet-001-1
-     Amount: 10000000000000000000 wei (10 AIUSD)
+     Amount: 10000000000000000000 wei (10 USDC)
      Escrow Contract: 0x0165878A594ca255338adfa4d48449f69242Eb8F
   ```
-- **Payment Deposits**: Client deposits AIUSD to escrow (10 AIUSD per task)
+- **Payment Deposits**: Client deposits USDC to escrow (10 USDC per task)
 - **Agent Verification**: Agent verifies payment on-chain before processing
   ```
   ✅ Payment verified for task req-subnet-001-1:
-     Amount: 10.00 AIUSD (locked in escrow)
+     Amount: 10.00 USDC (locked in escrow)
      Agent: 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
   🔐 Miner: Payment verified on-chain - proceeding with task
   ```
 - **FLUX Mining**: 400 FLUX to miner, 80 FLUX to validators per epoch
 - **BFT Consensus**: Validators decide payment release or refund
-- **Payment Outcomes**: 5 payments released (50 AIUSD), 2 refunded (20 AIUSD)
+- **Payment Outcomes**: 5 payments released (50 USDC), 2 refunded (20 USDC)
 - **Trustless Operation**: Complete audit trail of all payments on-chain
 
 ## Prerequisites
@@ -153,10 +154,13 @@ sudo ./run-subnet-only.sh
 # Press Ctrl+C when done exploring
 ```
 
-### Option 2: Full FLUX Mining Demo  
+### Option 2: Full FLUX Mining Demo
 ```bash
-# Complete PoCW system with blockchain integration
+# Complete PoCW system with blockchain integration (uses USDC by default)
 sudo ./run-flux-mining.sh
+
+# Or use AIUSD stablecoin instead
+sudo ./run-flux-mining.sh --payment-token AIUSD
 
 # Watch FLUX tokens being mined in real-time
 # Explore blockchain inspector at http://localhost:3000/pocw-inspector.html
@@ -164,13 +168,18 @@ sudo ./run-flux-mining.sh
 # Press Ctrl+C when done
 ```
 
+**💡 Payment Token Configuration:**
+- **Default**: Uses USDC stablecoin (6 decimals, industry standard)
+- **Alternative**: Use `--payment-token AIUSD` flag for custom AI stablecoin (18 decimals, EIP-3009 support)
+- Both tokens work identically with the x402 escrow system
+
 ## Smart Contracts
 
 | Contract | Purpose | Features |
 |----------|---------|----------|
 | **FLUXToken** | Soulbound intelligence tokens | Non-transferable, 21M max supply |
 | **HETUToken** | Staking for subnet registration | ERC20, 1M total supply |
-| **AIUSD** | AI services stablecoin | ERC20, USD-pegged, for x402 payments |
+| **USDC/AIUSD** | Payment stablecoin | ERC20, USD-pegged, for x402 payments (configurable) |
 | **x402PaymentEscrow** | Trustless payment escrow | BFT consensus-based release/refund, reentrancy protection |
 | **SubnetRegistry** | Manages subnet participants with identity | ERC-8004 identity verification, deposit requirements |
 | **PoCWVerifier** | Consensus verification & mining | Per-epoch FLUX distribution, validator authorization |
@@ -215,7 +224,7 @@ The web inspector at `http://localhost:3000/pocw-inspector.html` provides:
 
 ## 💳 x402 Payment System with Smart Escrow
 
-The system now integrates **x402 protocol** for trustless, escrow-based AIUSD stablecoin payments between clients and AI agents, leveraging permissionless validator consensus.
+The system now integrates **x402 protocol** for trustless, escrow-based stablecoin payments (USDC by default) between clients and AI agents, leveraging permissionless validator consensus.
 
 ### Revolutionary Payment Architecture
 
@@ -246,7 +255,7 @@ The x402 payment system eliminates trusted intermediaries by using smart contrac
 
 2️⃣ DEPOSIT PHASE
      │                              │                        │
-     ├──── approve(AIUSD) ─────────▶│                        │
+     ├──── approve(USDC) ──────────▶│                        │
      ├──── depositPayment() ────────▶│                        │
      │                              │ ✓ Funds locked         │
      │                              │                        │
@@ -273,7 +282,7 @@ The x402 payment system eliminates trusted intermediaries by using smart contrac
      │                              │                        │
      │    If Quality > 0.5 AND User Accepts:                 │
      │                              ├─ releasePayment() ─────▶│
-     │                              │  ✓ Agent receives AIUSD │
+     │                              │  ✓ Agent receives USDC │
      │                              │                        │
      │    If Quality ≤ 0.5 OR User Rejects:                  │
      ├◄──── refundPayment() ────────┤                        │
@@ -290,11 +299,11 @@ The escrow contract manages the entire payment lifecycle with cryptographic guar
 ```json
 {
   "taskId": "req-subnet-001-1",
-  "amount": "10000000000000000000",  // 10 AIUSD in wei
+  "amount": "10000000000000000000",  // 10 USDC in wei (or AIUSD if configured)
   "asset": {
-    "symbol": "AIUSD",
+    "symbol": "USDC",
     "contract": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-    "decimals": 18
+    "decimals": 6
   },
   "escrow": {
     "contract": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
@@ -312,7 +321,7 @@ The escrow contract manages the entire payment lifecycle with cryptographic guar
 // Public view function - Agent verifies payment before processing
 mapping(bytes32 => TaskPayment) public payments;
 
-// Client deposits AIUSD for a task (via coordinator)
+// Client deposits payment token (USDC/AIUSD) for a task (via coordinator)
 function depositPayment(
     bytes32 taskId,
     address client,
@@ -366,31 +375,37 @@ if qualityScore > 0.5 && userAccepted {
 - **Permissionless Operation**: Any validator can join with stake, no platform approval needed
 - **Economic Alignment**: Validators earn rewards for honest consensus participation
 
-### Payment Token: AIUSD Stablecoin
+### Payment Token: Stablecoin (USDC/AIUSD)
 
-**💵 AIUSD - AI Services Stablecoin**
+**💵 Configurable Stablecoin Payments**
 
-The system uses AIUSD, an ERC-20 stablecoin specifically designed for AI service payments:
+The system supports configurable stablecoin payments for AI services:
 
-**Properties:**
-- Pegged to USD for price stability
+**Default: USDC**
+- Industry-standard USD stablecoin
+- 6 decimals (matches real USDC)
 - Standard ERC-20 transferability
-- Minted for testing/demonstration purposes
-- Used for all client-to-agent payments
+- Production-ready interface
+
+**Alternative: AIUSD** (use `--payment-token AIUSD` flag)
+- Custom AI services stablecoin
+- 18 decimals
+- EIP-3009 gasless transfer support
+- Advanced features for special use cases
 
 **Client Payment Workflow:**
 ```bash
-1. Client receives AIUSD tokens (1000 AIUSD in demo)
+1. Client receives payment tokens (1000 USDC in demo)
 2. Client sends task request to agent
 3. Agent generates x402 payment request with details:
-   - Task ID, amount (10 AIUSD), escrow address, agent address, deadline
-4. Client approves escrow contract to spend AIUSD
+   - Task ID, amount (10 USDC), escrow address, agent address, deadline
+4. Client approves escrow contract to spend USDC
 5. Client deposits payment to escrow contract
 6. Agent verifies payment on-chain before processing
    - Queries blockchain: payments[taskId].status == DEPOSITED
    - Verifies: correct agent, sufficient amount, deadline valid
 7. Agent processes task only after payment verification
-8. AIUSD locked in escrow until consensus decision (release/refund)
+8. USDC locked in escrow until consensus decision (release/refund)
 ```
 
 ### Demonstrated Payment Scenarios

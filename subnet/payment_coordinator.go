@@ -21,12 +21,13 @@ import (
 )
 
 // PaymentCoordinator handles all x402 payment operations for the FLUX-Mining system.
-// It integrates with AIUSD and x402PaymentEscrow contracts to facilitate gasless payments.
+// It integrates with payment tokens (USDC/AIUSD) and x402PaymentEscrow contracts to facilitate gasless payments.
 type PaymentCoordinator struct {
 	client          *ethclient.Client
 	auth            *bind.TransactOpts
 	chainID         *big.Int
-	aiusdAddress    common.Address
+	paymentTokenAddress common.Address
+	paymentTokenName    string
 	escrowAddress   common.Address
 	coordinatorKey  *ecdsa.PrivateKey
 	coordinatorAddr common.Address
@@ -53,11 +54,12 @@ type PaymentTracker struct {
 
 // ContractAddresses holds deployed contract addresses
 type ContractAddresses struct {
-	AIUSD          string `json:"AIUSD"`
-	Escrow         string `json:"x402PaymentEscrow"`
-	Client         string `json:"Client"`
-	Agent          string `json:"Agent"`
-	V1Coordinator  string `json:"V1Coordinator"`
+	PaymentToken     string `json:"PaymentToken"`
+	PaymentTokenName string `json:"PaymentTokenName"`
+	Escrow           string `json:"x402PaymentEscrow"`
+	Client           string `json:"Client"`
+	Agent            string `json:"Agent"`
+	V1Coordinator    string `json:"V1Coordinator"`
 }
 
 // NewPaymentCoordinator creates a new payment coordinator instance
@@ -101,20 +103,21 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 	}
 
 	pc := &PaymentCoordinator{
-		client:          client,
-		auth:            auth,
-		chainID:         chainID,
-		aiusdAddress:    common.HexToAddress(addresses.AIUSD),
-		escrowAddress:   common.HexToAddress(addresses.Escrow),
-		coordinatorKey:  privateKey,
-		coordinatorAddr: coordinatorAddr,
-		payments:        make(map[string]*PaymentTracker),
+		client:              client,
+		auth:                auth,
+		chainID:             chainID,
+		paymentTokenAddress: common.HexToAddress(addresses.PaymentToken),
+		paymentTokenName:    addresses.PaymentTokenName,
+		escrowAddress:       common.HexToAddress(addresses.Escrow),
+		coordinatorKey:      privateKey,
+		coordinatorAddr:     coordinatorAddr,
+		payments:            make(map[string]*PaymentTracker),
 	}
 
 	fmt.Printf("💳 Payment Coordinator initialized:\n")
 	fmt.Printf("   Chain ID: %s\n", chainID.String())
 	fmt.Printf("   Coordinator: %s\n", coordinatorAddr.Hex())
-	fmt.Printf("   AIUSD: %s\n", pc.aiusdAddress.Hex())
+	fmt.Printf("   Payment Token: %s (%s)\n", pc.paymentTokenName, pc.paymentTokenAddress.Hex())
 	fmt.Printf("   Escrow: %s\n", pc.escrowAddress.Hex())
 
 	return pc, nil
@@ -122,15 +125,15 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 
 // GeneratePaymentRequest creates an x402 payment request for a task
 func (pc *PaymentCoordinator) GeneratePaymentRequest(taskID string, agentAddr common.Address) *PaymentRequest {
-	// Fixed pricing: 10 AIUSD per task (in wei)
+	// Fixed pricing: 10 tokens per task (in wei)
 	amount := "10000000000000000000" // 10 * 10^18 wei
 
 	return &PaymentRequest{
 		TaskID:         taskID,
 		Amount:         amount,
 		Asset: AssetInfo{
-			Symbol:   "AIUSD",
-			Contract: pc.aiusdAddress.Hex(),
+			Symbol:   pc.paymentTokenName,
+			Contract: pc.paymentTokenAddress.Hex(),
 			Decimals: 18,
 		},
 		Escrow: EscrowInfo{
@@ -224,7 +227,7 @@ func (pc *PaymentCoordinator) DepositPayment(
 		Deadline:    time.Unix(deadline.Int64(), 0),
 	}
 
-	fmt.Printf("💰 Payment deposited to escrow for task %s: %s AIUSD\n", taskID, formatEther(amount))
+	fmt.Printf("💰 Payment deposited to escrow for task %s: %s %s\n", taskID, formatEther(amount), pc.paymentTokenName)
 	fmt.Printf("   Client: %s\n", clientAddr.Hex())
 	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
 	fmt.Printf("   Escrow TX: %s\n", signedTx.Hash().Hex())
@@ -325,7 +328,7 @@ func (pc *PaymentCoordinator) DepositPaymentWithAuthorization(
 		Deadline:    time.Unix(validBefore.Int64(), 0),
 	}
 
-	fmt.Printf("💰 Payment deposited for task %s: %s AIUSD\n", taskID, formatEther(amount))
+	fmt.Printf("💰 Payment deposited for task %s: %s %s\n", taskID, formatEther(amount), pc.paymentTokenName)
 	fmt.Printf("   Client: %s\n", clientAddr.Hex())
 	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
 	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
@@ -345,19 +348,19 @@ func (pc *PaymentCoordinator) ReleasePaymentDirectDemo(taskID string) error {
 		return fmt.Errorf("payment status is not DEPOSITED (current: %v)", payment.Status)
 	}
 
-	// Get AIUSD token ABI for transfer
-	aiusdABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`))
+	// Get payment token ABI for transfer
+	tokenABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`))
 	if err != nil {
-		return fmt.Errorf("failed to parse AIUSD ABI: %w", err)
+		return fmt.Errorf("failed to parse token ABI: %w", err)
 	}
 
 	// Pack transfer function call: transfer(agent, amount)
-	data, err := aiusdABI.Pack("transfer", payment.Agent, payment.Amount)
+	data, err := tokenABI.Pack("transfer", payment.Agent, payment.Amount)
 	if err != nil {
 		return fmt.Errorf("failed to pack transfer: %w", err)
 	}
 
-	// Send transaction from coordinator to transfer AIUSD to agent
+	// Send transaction from coordinator to transfer payment tokens to agent
 	nonce, err := pc.client.PendingNonceAt(context.Background(), pc.auth.From)
 	if err != nil {
 		return fmt.Errorf("failed to get nonce: %w", err)
@@ -370,7 +373,7 @@ func (pc *PaymentCoordinator) ReleasePaymentDirectDemo(taskID string) error {
 
 	tx := types.NewTransaction(
 		nonce,
-		pc.aiusdAddress,
+		pc.paymentTokenAddress,
 		big.NewInt(0),
 		100000, // gas limit
 		gasPrice,
@@ -401,7 +404,7 @@ func (pc *PaymentCoordinator) ReleasePaymentDirectDemo(taskID string) error {
 	payment.Status = PaymentReleased
 	payment.ReleaseTime = time.Now()
 
-	fmt.Printf("💸 Payment released directly (demo mode): %s AIUSD\n", formatEther(payment.Amount))
+	fmt.Printf("💸 Payment released directly (demo mode): %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
 	fmt.Printf("   From: Coordinator %s\n", pc.auth.From.Hex())
 	fmt.Printf("   To: Agent %s\n", payment.Agent.Hex())
 	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
@@ -468,7 +471,7 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 	payment.Status = PaymentReleased
 
 	fmt.Printf("✅ Payment released for task %s\n", taskID)
-	fmt.Printf("   Agent received: %s AIUSD\n", formatEther(payment.Amount))
+	fmt.Printf("   Agent received: %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
 	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
 
 	return nil
@@ -486,11 +489,11 @@ func (pc *PaymentCoordinator) RefundPaymentDirectDemo(taskID string) error {
 		return fmt.Errorf("payment status is not DEPOSITED or EXPIRED (current: %v)", payment.Status)
 	}
 
-	// Update payment status (no blockchain transaction needed - coordinator keeps the AIUSD)
+	// Update payment status (no blockchain transaction needed - coordinator keeps the payment token)
 	payment.Status = PaymentRefunded
 	payment.RefundTime = time.Now()
 
-	fmt.Printf("↩️  Payment refunded (demo mode): %s AIUSD\n", formatEther(payment.Amount))
+	fmt.Printf("↩️  Payment refunded (demo mode): %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
 	fmt.Printf("   Client: %s\n", payment.Client.Hex())
 	fmt.Printf("   (No transfer needed - coordinator retains funds)\n")
 
@@ -556,7 +559,7 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 	payment.Status = PaymentRefunded
 
 	fmt.Printf("↩️  Payment refunded for task %s\n", taskID)
-	fmt.Printf("   Client received: %s AIUSD\n", formatEther(payment.Amount))
+	fmt.Printf("   Client received: %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
 	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
 
 	return nil
@@ -608,7 +611,7 @@ func (pc *PaymentCoordinator) InitializePaymentForDemo(taskID string, clientAddr
 	fmt.Printf("💰 Demo payment initialized for task %s\n", taskID)
 	fmt.Printf("   Client: %s\n", clientAddr.Hex())
 	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
-	fmt.Printf("   Amount: %s AIUSD\n", formatEther(amount))
+	fmt.Printf("   Amount: %s %s\n", formatEther(amount), pc.paymentTokenName)
 	fmt.Printf("   (Note: Blockchain deposit requires client signature - skipped for demo)\n")
 }
 
@@ -617,6 +620,11 @@ func (pc *PaymentCoordinator) GetPaymentStatus(taskID string) *PaymentTracker {
 		return payment
 	}
 	return nil
+}
+
+// GetPaymentTokenName returns the configured payment token name (USDC or AIUSD)
+func (pc *PaymentCoordinator) GetPaymentTokenName() string {
+	return pc.paymentTokenName
 }
 
 // VerifyPaymentLocked verifies that payment is locked in escrow on-chain before agent processes task
@@ -701,7 +709,7 @@ func (pc *PaymentCoordinator) VerifyPaymentLocked(taskID string, agentAddr commo
 	}
 
 	fmt.Printf("✅ Payment verified for task %s:\n", taskID)
-	fmt.Printf("   Amount: %s AIUSD (locked in escrow)\n", formatEther(payment.Amount))
+	fmt.Printf("   Amount: %s %s (locked in escrow)\n", formatEther(payment.Amount), pc.paymentTokenName)
 	fmt.Printf("   Agent: %s\n", payment.Agent.Hex())
 	fmt.Printf("   Client: %s\n", payment.Client.Hex())
 	fmt.Printf("   Deadline: %s\n", time.Unix(payment.Deadline.Int64(), 0).Format(time.RFC3339))
@@ -806,7 +814,8 @@ func formatEther(wei *big.Int) string {
 // This would be called by the client to sign the payment authorization off-chain
 func GenerateEIP712Signature(
 	privateKey *ecdsa.PrivateKey,
-	aiusdAddr common.Address,
+	tokenAddr common.Address,
+	tokenName string,
 	chainID *big.Int,
 	from common.Address,
 	to common.Address,
@@ -816,7 +825,7 @@ func GenerateEIP712Signature(
 	nonce [32]byte,
 ) (v uint8, r [32]byte, s [32]byte, err error) {
 	// EIP-712 domain separator
-	domainSeparator := createEIP712DomainSeparator(aiusdAddr, chainID)
+	domainSeparator := createEIP712DomainSeparator(tokenAddr, chainID, tokenName)
 
 	// EIP-712 struct hash for TransferWithAuthorization
 	structHash := createTransferWithAuthorizationHash(from, to, value, validAfter, validBefore, nonce)
@@ -842,14 +851,14 @@ func GenerateEIP712Signature(
 	return v, r, s, nil
 }
 
-func createEIP712DomainSeparator(contractAddr common.Address, chainID *big.Int) [32]byte {
+func createEIP712DomainSeparator(contractAddr common.Address, chainID *big.Int, tokenName string) [32]byte {
 	// keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
 	typeHash := crypto.Keccak256Hash(
 		[]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
 	)
 
-	// keccak256("AIUSD")
-	nameHash := crypto.Keccak256Hash([]byte("AIUSD"))
+	// keccak256(tokenName) - e.g., "USDC" or "AIUSD"
+	nameHash := crypto.Keccak256Hash([]byte(tokenName))
 
 	// keccak256("1")
 	versionHash := crypto.Keccak256Hash([]byte("1"))
