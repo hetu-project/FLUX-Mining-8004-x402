@@ -69,6 +69,15 @@
         </div>
 
         <div class="section">
+            <h2>🔍 ValidationRegistry - VLC Protocol Scores</h2>
+            <p style="color: #888; margin: 10px 0;">Verify agent validation scores submitted to the ValidationRegistry</p>
+            <input type="number" id="validationAgentId" placeholder="Agent ID (e.g., 0)" style="width: 150px;">
+            <button class="btn" onclick="getValidationScores()">Check Validation Scores</button>
+            <button class="btn" onclick="getAllValidations()">View All Validations</button>
+            <div id="validation-output" class="output">Enter Agent ID to check validation scores...</div>
+        </div>
+
+        <div class="section">
             <h2>Account Inspector</h2>
             <input type="text" id="accountAddress" placeholder="Enter address (miner, validator, etc.)" style="width: 400px;">
             <button class="btn" onclick="getAccountInfo()">Get Account Info</button>
@@ -113,6 +122,12 @@
                 "function name() view returns (string)",
                 "function symbol() view returns (string)",
                 "function totalSupply() view returns (uint256)"
+            ],
+            "ValidationRegistry": [
+                "function getValidationStatus(bytes32) view returns (address,uint256,uint8,bytes32,bytes32,uint256)",
+                "function getAgentValidations(uint256) view returns (bytes32[])",
+                "function getValidatorRequests(address) view returns (bytes32[])",
+                "function getSummary(uint256,address[],bytes32) view returns (uint64,uint8)"
             ],
             "HETUToken": [
                 "function balanceOf(address) view returns (uint256)",
@@ -177,6 +192,7 @@
                         paymentTokenName = addresses.PaymentTokenName || "USDC";
                         contractAddresses.x402PaymentEscrow = addresses.x402PaymentEscrow;
                         contractAddresses.IdentityRegistry = addresses.IdentityRegistry || contractAddresses.IdentityRegistry;
+                        contractAddresses.ValidationRegistry = addresses.ValidationRegistry || contractAddresses.ValidationRegistry;
                         contractAddresses.HETUToken = addresses.HETUToken || contractAddresses.HETUToken;
                         contractAddresses.FLUXToken = addresses.FLUXToken || contractAddresses.FLUXToken;
                         contractAddresses.SubnetRegistry = addresses.SubnetRegistry || contractAddresses.SubnetRegistry;
@@ -869,6 +885,214 @@
             } catch (error) {
                 console.error("❌ Check error:", error);
                 document.getElementById('identity-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
+            }
+        }
+
+        // ValidationRegistry Functions for VLC Protocol Score Verification
+        async function getValidationScores() {
+            try {
+                const agentId = document.getElementById('validationAgentId').value;
+                if (!agentId && agentId !== 0) {
+                    document.getElementById('validation-output').innerHTML = '<div class="error">❌ Please enter an Agent ID</div>';
+                    return;
+                }
+
+                document.getElementById('validation-output').innerHTML = `<div class="highlight">🔍 Loading validation scores for Agent #${agentId}...</div>`;
+
+                // Get ValidationRegistry address from loaded config or use default
+                const validationAddress = contractAddresses.ValidationRegistry || "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+                const validationABI = contractABIsByType.ValidationRegistry;
+                const validationRegistry = new ethers.Contract(validationAddress, validationABI, provider);
+
+                // Get all validations for this agent
+                const requestHashes = await validationRegistry.getAgentValidations(agentId);
+
+                if (requestHashes.length === 0) {
+                    document.getElementById('validation-output').innerHTML = `
+                        <div class="error">No validations found for Agent #${agentId}</div>
+                    `;
+                    return;
+                }
+
+                let output = `
+                    <div class="success">🔍 VLC Validation Scores for Agent #${agentId}</div>
+                    <div><span class="highlight">Total Validations:</span> ${requestHashes.length}</div>
+                    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+                `;
+
+                // Get details for each validation
+                const scores = [];
+                for (const hash of requestHashes) {
+                    try {
+                        const [validatorAddress, agentIdReturned, score, responseHash, tag, timestamp] =
+                            await validationRegistry.getValidationStatus(hash);
+
+                        // Check if it's a VLC validation (check first bytes of tag)
+                        const tagStr = tag.slice(0, 26); // First 12 chars of hex (VLC_PROTOCOL)
+                        const isVLC = tagStr === "0x564c435f50524f544f434f4c"; // hex for "VLC_PROTOCOL"
+
+                        if (isVLC) {
+                            scores.push({
+                                validator: validatorAddress,
+                                score: Number(score),
+                                timestamp: Number(timestamp),
+                                hash: hash
+                            });
+                        }
+                    } catch (err) {
+                        console.log("Error fetching validation:", err);
+                    }
+                }
+
+                // Sort by timestamp
+                scores.sort((a, b) => b.timestamp - a.timestamp);
+
+                // Calculate average
+                const avgScore = scores.length > 0 ?
+                    Math.round(scores.reduce((sum, s) => sum + s.score, 0) / scores.length) : 0;
+
+                output += `
+                    <div style="margin-bottom: 15px;">
+                        <span class="highlight">📊 Average VLC Score:</span>
+                        <span style="font-size: 24px; color: ${avgScore >= 70 ? '#4CAF50' : '#ff4444'};">
+                            ${avgScore}/100
+                        </span>
+                        <span style="color: ${avgScore >= 70 ? '#4CAF50' : '#ff4444'};">
+                            (${avgScore >= 70 ? '✅ PASSED' : '❌ FAILED'})
+                        </span>
+                    </div>
+                `;
+
+                // Display individual validator scores
+                output += `<div class="highlight">Individual Validator Scores:</div>`;
+                for (const score of scores) {
+                    const date = new Date(score.timestamp * 1000).toLocaleString();
+
+                    output += `
+                        <div style="margin: 10px 0; padding: 10px; border: 1px solid #333; background: #111;">
+                            <div><span class="highlight">Validator:</span> <span class="address">${score.validator}</span></div>
+                            <div><span class="highlight">Score:</span>
+                                <span style="color: ${score.score >= 70 ? '#4CAF50' : '#ff4444'};">
+                                    ${score.score}/100
+                                </span>
+                            </div>
+                            <div><span class="highlight">Time:</span> ${date}</div>
+                            <div><span class="highlight">Request Hash:</span> <span class="tx-hash">${score.hash.slice(0, 10)}...</span></div>
+                        </div>
+                    `;
+                }
+
+                output += '</div>';
+                document.getElementById('validation-output').innerHTML = output;
+
+            } catch (error) {
+                document.getElementById('validation-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
+            }
+        }
+
+        async function getAllValidations() {
+            try {
+                document.getElementById('validation-output').innerHTML = `<div class="highlight">🔍 Loading all validation records...</div>`;
+
+                const validationAddress = contractAddresses.ValidationRegistry || "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+                const validators = [
+                    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", // Validator 1
+                    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", // Validator 2
+                    "0x90F79bf6EB2c4f870365E785982E1f101E93b906", // Validator 3
+                    "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"  // Validator 4
+                ];
+
+                const validationABI = contractABIsByType.ValidationRegistry;
+                const validationRegistry = new ethers.Contract(validationAddress, validationABI, provider);
+
+                let allValidations = [];
+
+                // Get validations from each validator
+                for (let i = 0; i < validators.length; i++) {
+                    const validator = validators[i];
+                    try {
+                        const requestHashes = await validationRegistry.getValidatorRequests(validator);
+
+                        for (const hash of requestHashes) {
+                            try {
+                                const [validatorAddr, agentId, score, responseHash, tag, timestamp] =
+                                    await validationRegistry.getValidationStatus(hash);
+
+                                // Check if it's a VLC validation
+                                const tagStr = tag.slice(0, 26);
+                                const isVLC = tagStr === "0x564c435f50524f544f434f4c";
+
+                                if (isVLC) {
+                                    allValidations.push({
+                                        validator: validatorAddr,
+                                        validatorNum: i + 1,
+                                        agentId: Number(agentId),
+                                        score: Number(score),
+                                        timestamp: Number(timestamp),
+                                        hash: hash
+                                    });
+                                }
+                            } catch (err) {
+                                console.log("Error fetching validation details:", err);
+                            }
+                        }
+                    } catch (err) {
+                        console.log(`Error fetching requests for validator ${i+1}:`, err);
+                    }
+                }
+
+                // Sort by timestamp (newest first)
+                allValidations.sort((a, b) => b.timestamp - a.timestamp);
+
+                // Group by agent
+                const agentScores = {};
+                for (const val of allValidations) {
+                    if (!agentScores[val.agentId]) {
+                        agentScores[val.agentId] = [];
+                    }
+                    agentScores[val.agentId].push(val);
+                }
+
+                let output = `
+                    <div class="success">📊 All VLC Validation Records</div>
+                    <div><span class="highlight">Total Validations:</span> ${allValidations.length}</div>
+                    <div><span class="highlight">Unique Agents:</span> ${Object.keys(agentScores).length}</div>
+                    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+                `;
+
+                // Display by agent
+                for (const [agentId, validations] of Object.entries(agentScores)) {
+                    const avgScore = Math.round(
+                        validations.reduce((sum, v) => sum + v.score, 0) / validations.length
+                    );
+
+                    output += `
+                        <div style="margin: 20px 0; padding: 15px; border: 2px solid #333; background: #0a0a0a;">
+                            <div style="font-size: 18px; margin-bottom: 10px;">
+                                <span class="highlight">Agent #${agentId}</span>
+                                <span style="float: right; color: ${avgScore >= 70 ? '#4CAF50' : '#ff4444'};">
+                                    Avg: ${avgScore}/100 (${avgScore >= 70 ? '✅ PASSED' : '❌ FAILED'})
+                                </span>
+                            </div>
+                    `;
+
+                    for (const val of validations) {
+                        const date = new Date(val.timestamp * 1000).toLocaleString();
+                        output += `
+                            <div style="margin: 5px 0; padding: 5px; border-left: 3px solid ${val.score >= 70 ? '#4CAF50' : '#ff4444'};">
+                                Validator-${val.validatorNum}: ${val.score}/100 - ${date}
+                            </div>
+                        `;
+                    }
+
+                    output += '</div>';
+                }
+
+                output += '</div>';
+                document.getElementById('validation-output').innerHTML = output;
+
+            } catch (error) {
+                document.getElementById('validation-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
             }
         }
 

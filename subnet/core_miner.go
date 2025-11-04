@@ -118,7 +118,10 @@ func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string
 
 	// STEP 0: Verify payment is locked in escrow (trustless operation)
 	// Agent doesn't trust validator - queries blockchain directly for cryptographic proof
-	if m.paymentVerifier != nil {
+	// EXCEPTION: Skip payment verification for VLC validation requests (onboarding gate)
+	isVLCValidation := len(requestID) >= 20 && requestID[:20] == "vlc-validation-test-"
+
+	if m.paymentVerifier != nil && !isVLCValidation {
 		agentAddr := common.HexToAddress(m.agentAddress)
 		minAmount := new(big.Int)
 		minAmount.SetString(m.minPayment, 10)
@@ -147,10 +150,13 @@ func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string
 			}
 		}
 		fmt.Printf("🔐 Miner %s: Payment verified on-chain - proceeding with task\n", m.ID)
+	} else if isVLCValidation {
+		fmt.Printf("🔓 Miner %s: VLC validation request detected - skipping payment verification\n", m.ID)
 	}
 
-	// Increment VLC clock for miner processing (miner ID = 1)
+	// VLC Protocol: +1 for message entering from validator
 	m.VLCClock.Inc(1)
+	fmt.Printf("Miner %s: Message entered from validator → VLC [%d]\n", m.ID, m.VLCClock.Values[1])
 
 	response := &MinerResponseMessage{
 		SubnetMessage: SubnetMessage{
@@ -160,7 +166,6 @@ func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string
 			Sender:    m.ID,
 			Timestamp: time.Now().Unix(),
 		},
-		VLCClock:    m.VLCClock,
 		InputNumber: inputNumber,
 	}
 
@@ -170,11 +175,22 @@ func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string
 		response.OutputType = outputType
 		response.Output = output
 		response.InfoRequest = infoRequest
+
+		if outputType == NeedMoreInfo {
+			fmt.Printf("Miner %s: Requesting more info\n", m.ID)
+		}
 	} else {
 		// Default: process everything as ready
 		response.OutputType = OutputReady
 		response.Output = "Default processing completed"
 	}
+
+	// VLC Protocol: +1 for message leaving to validator
+	m.VLCClock.Inc(1)
+	fmt.Printf("Miner %s: Message leaving to validator → VLC [%d]\n", m.ID, m.VLCClock.Values[1])
+
+	// Update response with current VLC state (after both increments)
+	response.VLCClock = m.VLCClock
 
 	// Store the response for tracking
 	m.processedInputs[inputNumber] = response
@@ -198,8 +214,9 @@ func (m *CoreMiner) ProcessAdditionalInfo(originalInput string, additionalInfo s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Increment VLC clock for processing additional context (miner ID = 1)
+	// VLC Protocol: +1 for message entering from validator (additional info)
 	m.VLCClock.Inc(1)
+	fmt.Printf("Miner %s: Additional info entered from validator → VLC [%d]\n", m.ID, m.VLCClock.Values[1])
 
 	response := &MinerResponseMessage{
 		SubnetMessage: SubnetMessage{
@@ -210,7 +227,6 @@ func (m *CoreMiner) ProcessAdditionalInfo(originalInput string, additionalInfo s
 			Timestamp: time.Now().Unix(),
 		},
 		OutputType:  OutputReady,
-		VLCClock:    m.VLCClock, // Use incremented clock
 		InputNumber: inputNumber,
 	}
 
@@ -222,6 +238,13 @@ func (m *CoreMiner) ProcessAdditionalInfo(originalInput string, additionalInfo s
 		response.Output = originalInput + " [Additional: " + additionalInfo + "]"
 	}
 
+	// VLC Protocol: +1 for message leaving to validator (final output)
+	m.VLCClock.Inc(1)
+	fmt.Printf("Miner %s: Final output leaving to validator → VLC [%d]\n", m.ID, m.VLCClock.Values[1])
+
+	// Update response with current VLC state (after both increments)
+	response.VLCClock = m.VLCClock
+
 	// Update stored response
 	m.processedInputs[inputNumber] = response
 	return response
@@ -232,6 +255,15 @@ func (m *CoreMiner) GetCurrentClock() *vlc.Clock {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.VLCClock.Copy()
+}
+
+// ResetClock resets the VLC clock to initial state (all zeros)
+// Used after VLC validation passes to start fresh for actual subnet operations
+func (m *CoreMiner) ResetClock() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.VLCClock = vlc.New()
+	fmt.Printf("🔄 Miner %s: VLC clock reset to initial state for subnet operations\n", m.ID)
 }
 
 // UpdateValidatorClock synchronizes miner's VLC with validator operations

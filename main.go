@@ -18,74 +18,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/hetu-project/FLUX-Mining-8004-x402/dgraph"
-	"github.com/hetu-project/FLUX-Mining-8004-x402/subnet"
 	"github.com/hetu-project/FLUX-Mining-8004-x402/subnet/demo"
 )
 
-// EpochBridge handles the interface between Go and the Node.js mainnet bridge
-type EpochBridge struct {
-	bridgeCmd *exec.Cmd
-}
-
-// NewEpochBridge creates a new bridge to the Node.js mainnet submission service
-func NewEpochBridge() *EpochBridge {
-	return &EpochBridge{}
-}
-
-// StartBridge starts the Node.js bridge service
-func (eb *EpochBridge) StartBridge() error {
-	fmt.Println("🌐 Starting Per-Epoch Mainnet Bridge...")
-	
-	// Start the Node.js bridge service
-	cmd := exec.Command("node", "mainnet-bridge-per-epoch.js")
-	cmd.Dir = "."
-	
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start bridge: %v", err)
-	}
-	
-	eb.bridgeCmd = cmd
-	
-	// Wait for bridge to initialize
-	time.Sleep(3 * time.Second)
-	fmt.Println("✅ Mainnet bridge service started")
-	
-	return nil
-}
-
-// SubmitEpoch sends epoch data to the mainnet bridge for submission
-func (eb *EpochBridge) SubmitEpoch(epochNumber int, subnetID string, epochData *subnet.EpochData) {
-	fmt.Printf("🚀 Bridge: Epoch %d ready for mainnet submission\n", epochNumber)
-	
-	// In a full implementation, this would:
-	// 1. Convert epoch data to JSON
-	// 2. Send HTTP request to Node.js bridge service
-	// 3. Bridge submits to mainnet and mines FLUX tokens
-
-	// For demonstration, we'll simulate the submission
-	fmt.Printf("  📊 Subnet: %s\n", subnetID)
-	fmt.Printf("  🔗 Rounds: %v\n", epochData.CompletedRounds)
-	fmt.Printf("  ⏰ VLC State: %v\n", epochData.VLCClockState)
-	fmt.Printf("  💰 Triggering FLUX mining for epoch %d...\n", epochNumber)
-	
-	// Simulate processing time
-	time.Sleep(2 * time.Second)
-	
-	fmt.Printf("✅ Epoch %d submitted to mainnet successfully!\n", epochNumber)
-}
-
-// StopBridge stops the Node.js bridge service
-func (eb *EpochBridge) StopBridge() {
-	if eb.bridgeCmd != nil {
-		eb.bridgeCmd.Process.Kill()
-		fmt.Println("🔴 Mainnet bridge service stopped")
-	}
-}
 
 // waitForDgraph waits for Dgraph to be fully ready
 func waitForDgraph() error {
@@ -124,17 +62,8 @@ func main() {
 		fmt.Println("")
 	}
 
-	// Initialize mainnet bridge only if not in subnet-only mode
-	var bridge *EpochBridge
-	if !subnetOnlyMode {
-		bridge = NewEpochBridge()
-		err := bridge.StartBridge()
-		if err != nil {
-			fmt.Printf("⚠️  Bridge startup failed: %v\n", err)
-			fmt.Println("Continuing with demonstration mode...")
-		}
-		defer bridge.StopBridge()
-	}
+	// Bridge is started by the bash script, so we don't need to start it here
+	// The Go code will communicate with the bridge via HTTP on port 3001
 
 	// Try to initialize Dgraph gracefully
 	fmt.Println("Waiting for Dgraph to be ready...")
@@ -165,21 +94,23 @@ func main() {
 		fmt.Println("⚠️  GraphAdapter not available - running standard demo")
 	}
 
-	fmt.Println("")
-	if subnetOnlyMode {
-		fmt.Println("🎯 Subnet-Only Demo Flow:")
-		fmt.Println("  Round 1-7  → Pure subnet consensus")
-		fmt.Println("  📊 VLC data visible at: http://localhost:8000")
-		fmt.Println("  ⚠️  No blockchain integration or FLUX mining")
-	} else {
-		fmt.Println("🎯 Demo Flow:")
-		fmt.Println("  Round 1-3  → Epoch 1 → Immediate mainnet submission")
-		fmt.Println("  Round 4-6  → Epoch 2 → Immediate mainnet submission") 
-		fmt.Println("  Round 7    → Partial Epoch 3 → Submit at demo end")
-	}
-	fmt.Println("")
 
-	// Run the subnet demo
+	// Check if running in validation-only mode
+	validationOnlyMode := os.Getenv("VALIDATION_ONLY_MODE") == "true"
+	if validationOnlyMode {
+		// Run VLC validation ONLY when in validation mode
+		fmt.Println("🔐 Running VLC Protocol Validation...")
+		if !coordinator.RunVLCValidation() {
+			fmt.Println("❌ Agent failed VLC validation - cannot proceed with demo")
+			fmt.Println("Exiting...")
+			os.Exit(1)
+		}
+		fmt.Println("✅ Validation complete - exiting (validation-only mode)")
+		fmt.Println("   Bash script will now register subnet on blockchain")
+		os.Exit(0)
+	}
+
+	// Run the subnet demo (validation already passed in previous run)
 	coordinator.RunDemo()
 
 	fmt.Println("")

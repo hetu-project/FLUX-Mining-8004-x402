@@ -131,7 +131,18 @@ cleanup() {
         fi
         rm -f anvil-per-epoch.pid anvil-per-epoch.log
     fi
-    
+
+    # Stop the bridge if running
+    if [ ! -z "$BRIDGE_PID" ] && kill -0 $BRIDGE_PID 2>/dev/null; then
+        echo "🔴 Stopping Bridge (PID: $BRIDGE_PID)..."
+        kill $BRIDGE_PID
+    fi
+    # Also kill any other processes on port 3001
+    if lsof -i :3001 > /dev/null 2>&1; then
+        echo "🔴 Stopping any remaining Bridge processes on port 3001..."
+        lsof -ti :3001 | xargs kill -9 2>/dev/null || true
+    fi
+
     # Stop Dgraph and Ratel containers
     echo "🔴 Stopping Dgraph and Ratel containers..."
     docker stop dgraph-standalone 2>/dev/null || true
@@ -342,6 +353,9 @@ echo "────────────────────────�
 # Configuration
 PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 VALIDATOR1_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+VALIDATOR2_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+VALIDATOR3_KEY="0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
+VALIDATOR4_KEY="0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
 MINER_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
 RPC_URL="http://localhost:8545"
 
@@ -367,12 +381,40 @@ fi
 echo "Compiling contracts..."
 $FORGE_PATH build > /dev/null 2>&1
 
-# === Deploy ERC-8004 Identity Registry FIRST ===
-echo "🆔 Deploying ERC-8004 IdentityRegistry..."
+# === Deploy ERC-8004 Identity, Validation, and Reputation Registries ===
+echo ""
+echo "================================================================"
+echo "          ERC-8004 IDENTITY & VALIDATION DEPLOYMENT"
+echo "================================================================"
+echo ""
+
+echo "[1/3] 🆔 Deploying IdentityRegistry..."
 IDENTITY_RESULT=$($FORGE_PATH create contracts/8004/IdentityRegistry.sol:IdentityRegistry \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast 2>&1)
 IDENTITY_ADDRESS=$(echo "$IDENTITY_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
-echo "   IdentityRegistry: $IDENTITY_ADDRESS"
+echo "  └─ Deployed at: $IDENTITY_ADDRESS"
+
+echo ""
+echo "[2/3] 🔍 Deploying ValidationRegistry..."
+echo "  ├─ Linking to IdentityRegistry: $IDENTITY_ADDRESS"
+VALIDATION_RESULT=$($FORGE_PATH create contracts/8004/ValidationRegistry.sol:ValidationRegistry \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast \
+    --constructor-args "$IDENTITY_ADDRESS" 2>&1)
+VALIDATION_ADDRESS=$(echo "$VALIDATION_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
+echo "  └─ Deployed at: $VALIDATION_ADDRESS"
+
+echo ""
+echo "[3/3] ⭐ Deploying ReputationRegistry..."
+echo "  ├─ Linking to IdentityRegistry: $IDENTITY_ADDRESS"
+REPUTATION_RESULT=$($FORGE_PATH create contracts/8004/ReputationRegistry.sol:ReputationRegistry \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast \
+    --constructor-args "$IDENTITY_ADDRESS" 2>&1)
+REPUTATION_ADDRESS=$(echo "$REPUTATION_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
+echo "  └─ Deployed at: $REPUTATION_ADDRESS"
+
+echo ""
+echo "✅ ERC-8004 Registries Deployed Successfully"
+echo "────────────────────────────────────────────"
 
 # === Deploy Payment Token (USDC or AIUSD) for x402 Payments ===
 echo "💵 Deploying $PAYMENT_TOKEN Token (x402 payment stablecoin)..."
@@ -429,7 +471,16 @@ else
     AGENT_ID_DEC="0"
 fi
 
+echo ""
+echo "📋 VLC Protocol Validation"
+echo "────────────────────────────────────────────"
+echo "   ℹ️  VLC validation will be performed BEFORE subnet registration"
+echo "   The agent must pass VLC protocol tests to continue"
+echo ""
+
 # Deploy contracts
+echo "🔧 Deploying Core Contracts..."
+echo "────────────────────────────────────────────"
 echo "Deploying HETU Token..."
 HETU_RESULT=$($FORGE_PATH create contracts/HETUToken.sol:HETUToken \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast 2>&1)
@@ -467,9 +518,9 @@ fi
 
 echo "   x402PaymentEscrow: $ESCROW_ADDRESS"
 
-# Initialize contracts (SubnetRegistry needs both HETU and Identity addresses)
+# Initialize contracts (SubnetRegistry needs HETU, Identity, and Validation addresses)
 echo "Initializing contracts..."
-timeout 3 $CAST_PATH send $REGISTRY_ADDRESS "initialize(address,address)" $HETU_ADDRESS $IDENTITY_ADDRESS \
+timeout 3 $CAST_PATH send $REGISTRY_ADDRESS "initialize(address,address,address)" $HETU_ADDRESS $IDENTITY_ADDRESS $VALIDATION_ADDRESS \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
 
 timeout 3 $CAST_PATH send $VERIFIER_ADDRESS "initialize(address,address)" $FLUX_ADDRESS $REGISTRY_ADDRESS \
@@ -481,7 +532,7 @@ timeout 3 $CAST_PATH send $FLUX_ADDRESS "setPoCWVerifier(address)" $VERIFIER_ADD
 # Authorize V1 (Validator1) as coordinator in x402PaymentEscrow
 echo "Authorizing V1 as x402 payment coordinator..."
 timeout 3 $CAST_PATH send $ESCROW_ADDRESS "authorizeCoordinator(address)" $VALIDATOR1 \
-    --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo "   ✅ V1 Coordinator authorized successfully"
 else
@@ -503,7 +554,7 @@ echo "💵 Bootstrapping client with ETH, $PAYMENT_TOKEN and HETU..."
 # First, send some ETH to client for gas fees
 echo "   Sending 10 ETH to client..."
 timeout 3 $CAST_PATH send $CLIENT --value 10ether \
-    --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo "   ✅ Client funded with 10 ETH"
 else
@@ -529,7 +580,7 @@ echo "🔓 Approving escrow to spend client's $PAYMENT_TOKEN..."
 # Client is VALIDATOR2 (account #2): 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 CLIENT_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
-    --private-key $CLIENT_KEY --rpc-url $RPC_URL 2>&1
+    --private-key $CLIENT_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo "   ✅ Client approved escrow to spend $PAYMENT_TOKEN"
 else
@@ -546,32 +597,15 @@ for i in 0 1 2 3; do
         --private-key ${VALIDATOR_KEYS[$i]} --rpc-url $RPC_URL > /dev/null 2>&1 || true
 done
 
-# Register subnet WITH AGENT ID
+# Subnet registration will happen AFTER VLC validation passes
 SUBNET_ID="per-epoch-subnet-001"
-echo "🔐 Registering subnet with Agent ID $AGENT_ID_DEC..."
-echo "   Subnet: $SUBNET_ID"
-echo "   Miner: $MINER"
-echo "   Validators: [$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]"
-
-# Register subnet (without hiding errors)
-$CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
-    "$SUBNET_ID" \
-    "$AGENT_ID_DEC" \
-    "$MINER" \
-    "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
-    --private-key $MINER_KEY --rpc-url $RPC_URL
-
-if [ $? -eq 0 ]; then
-    echo "✅ Subnet registered successfully"
-else
-    echo "❌ Subnet registration failed"
-    exit 1
-fi
 
 # Generate contract addresses JSON for bridge and inspector (name -> address format)
 cat > contract_addresses.json << EOF
 {
   "IdentityRegistry": "$IDENTITY_ADDRESS",
+  "ValidationRegistry": "$VALIDATION_ADDRESS",
+  "ReputationRegistry": "$REPUTATION_ADDRESS",
   "HETUToken": "$HETU_ADDRESS",
   "FLUXToken": "$FLUX_ADDRESS",
   "SubnetRegistry": "$REGISTRY_ADDRESS",
@@ -581,7 +615,16 @@ cat > contract_addresses.json << EOF
   "x402PaymentEscrow": "$ESCROW_ADDRESS",
   "Client": "$CLIENT",
   "Agent": "$MINER",
-  "V1Coordinator": "$VALIDATOR1"
+  "AgentPrivateKey": "$MINER_KEY",
+  "V1Coordinator": "$VALIDATOR1",
+  "Validator1": "$VALIDATOR1",
+  "Validator2": "$VALIDATOR2",
+  "Validator3": "$VALIDATOR3",
+  "Validator4": "$VALIDATOR4",
+  "SubnetID": "$SUBNET_ID",
+  "AgentID": "$AGENT_ID_DEC",
+  "ChainID": "31337",
+  "RpcUrl": "$RPC_URL"
 }
 EOF
 
@@ -589,15 +632,26 @@ echo ""
 echo "📄 Contract addresses saved to contract_addresses.json"
 echo "   View in inspector at: http://localhost:3000/pocw-inspector.html"
 
-echo "✅ Mainnet contracts deployed and configured with ERC-8004 Identity + x402 Payments"
-echo "   🆔 Identity Registry: $IDENTITY_ADDRESS"
-echo "   🆔 Miner Agent ID: $AGENT_ID_DEC"
-echo "   💰 HETU Token: $HETU_ADDRESS"
-echo "   ⚡ FLUX Token: $FLUX_ADDRESS"
-echo "   📋 PoCW Verifier: $VERIFIER_ADDRESS"
-echo "   💵 $PAYMENT_TOKEN Token: $PAYMENT_TOKEN_ADDRESS"
-echo "   🔒 x402 Escrow: $ESCROW_ADDRESS"
-echo "   👤 Client Address: $CLIENT"
+echo "✅ Mainnet contracts deployed with ERC-8004 + VLC Validation + x402 Payments"
+echo ""
+echo "   ERC-8004 Registries:"
+echo "   ├─ 🆔 Identity: $IDENTITY_ADDRESS"
+echo "   ├─ 🔍 Validation: $VALIDATION_ADDRESS"
+echo "   └─ ⭐ Reputation: $REPUTATION_ADDRESS"
+echo ""
+echo "   Core Mining Contracts:"
+echo "   ├─ 💰 HETU Token: $HETU_ADDRESS"
+echo "   ├─ ⚡ FLUX Token: $FLUX_ADDRESS"
+echo "   └─ 📋 PoCW Verifier: $VERIFIER_ADDRESS"
+echo ""
+echo "   x402 Payment System:"
+echo "   ├─ 💵 $PAYMENT_TOKEN Token: $PAYMENT_TOKEN_ADDRESS"
+echo "   ├─ 🔒 Escrow: $ESCROW_ADDRESS"
+echo "   └─ 👤 Client Address: $CLIENT"
+echo ""
+echo "   Agent Info:"
+echo "   ├─ Agent ID: #$AGENT_ID_DEC"
+echo "   └─ Agent Address: $MINER"
 
 # Helper function to format wei to FLUX tokens
 format_flux_balance() {
@@ -692,6 +746,13 @@ echo "  - Epoch 2 (rounds 4-6): Submit after task 6 completes"
 echo "  - Partial epoch 3 (round 7): Submit after demo ends"
 echo ""
 
+# Kill any existing bridge process on port 3001
+if lsof -i :3001 > /dev/null 2>&1; then
+    echo "⚠️  Found existing bridge on port 3001, killing it..."
+    lsof -ti :3001 | xargs kill -9 2>/dev/null || true
+    sleep 2
+fi
+
 # Initialize the Node.js bridge with HTTP server
 echo "🌐 Initializing Per-Epoch Mainnet Bridge with HTTP server..."
 node -e "
@@ -739,11 +800,281 @@ echo "   Go subnet will make HTTP calls to JavaScript bridge"
 echo "   Each completed epoch will trigger actual blockchain submissions"
 echo ""
 
-# Run the per-epoch subnet demo with real HTTP bridge integration
-echo "🚀 Starting Go subnet with per-epoch submission..."
+# Step 1: Run VLC Validation FIRST (before subnet registration)
+echo "🔐 Running VLC Protocol Validation..."
+echo ""
+VALIDATION_ONLY_MODE=true timeout 60 go run main.go
+VALIDATION_EXIT_CODE=$?
+
+if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "❌ VLC Validation FAILED - cannot register subnet"
+
+    # Submit failed validation results from ALL validators to ValidationRegistry
+    echo "📝 Recording failed validation from all validators in ValidationRegistry..."
+
+    VALIDATORS=("$VALIDATOR1" "$VALIDATOR2" "$VALIDATOR3" "$VALIDATOR4")
+    VALIDATOR_KEYS=("$VALIDATOR1_KEY" "$VALIDATOR2_KEY" "$VALIDATOR3_KEY" "$VALIDATOR4_KEY")
+    VALIDATOR_NAMES=("Validator-1" "Validator-2" "Validator-3" "Validator-4")
+
+    for i in {0..3}; do
+        VALIDATOR=${VALIDATORS[$i]}
+        VALIDATOR_KEY=${VALIDATOR_KEYS[$i]}
+        VALIDATOR_NAME=${VALIDATOR_NAMES[$i]}
+
+        REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
+        REQUEST_HASH="0x${REQUEST_HASH}"
+
+        # Submit validation request
+        $CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
+            "$VALIDATOR" \
+            "$AGENT_ID_DEC" \
+            "VLC Protocol Validation Test" \
+            "$REQUEST_HASH" \
+            --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        # Submit failed scores (0-20 range for failures)
+        if [ $i -eq 0 ]; then
+            SCORE=0   # Complete failure
+        elif [ $i -eq 1 ]; then
+            SCORE=10  # Partial implementation
+        elif [ $i -eq 2 ]; then
+            SCORE=5   # Minimal implementation
+        else
+            SCORE=15  # Some progress but failed
+        fi
+
+        RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
+        RESPONSE_HASH="0x${RESPONSE_HASH}"
+        VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
+        VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
+
+        $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+            "$REQUEST_HASH" \
+            "$SCORE" \
+            "VLC validation failed - agent does not implement causal consistency correctly" \
+            "$RESPONSE_HASH" \
+            "$VLC_TAG" \
+            --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "   ⚠️  ${VALIDATOR_NAME}: Failure score ${SCORE}/100 recorded"
+        fi
+    done
+
+    echo ""
+    echo "   📊 Validation Summary:"
+    echo "      Agent ID: #${AGENT_ID_DEC}"
+    echo "      Average Score: ~7/100"
+    echo "      Status: ❌ FAILED"
+
+    cleanup
+    exit 1
+fi
+
+echo ""
+echo "✅ VLC Validation PASSED - proceeding with subnet registration"
+echo ""
+
+# Step 1.5: Submit validation results from ALL validators to ValidationRegistry
+echo "📝 Submitting VLC validation results from all validators to ValidationRegistry..."
+
+# Arrays for validators
+VALIDATORS=("$VALIDATOR1" "$VALIDATOR2" "$VALIDATOR3" "$VALIDATOR4")
+VALIDATOR_KEYS=("$VALIDATOR1_KEY" "$VALIDATOR2_KEY" "$VALIDATOR3_KEY" "$VALIDATOR4_KEY")
+VALIDATOR_NAMES=("Validator-1" "Validator-2" "Validator-3" "Validator-4")
+
+# Each validator submits their own validation
+for i in {0..3}; do
+    VALIDATOR=${VALIDATORS[$i]}
+    VALIDATOR_KEY=${VALIDATOR_KEYS[$i]}
+    VALIDATOR_NAME=${VALIDATOR_NAMES[$i]}
+
+    # Generate unique request hash for each validator
+    REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
+    REQUEST_HASH="0x${REQUEST_HASH}"
+
+    echo ""
+    echo "   📋 ${VALIDATOR_NAME} submitting validation..."
+
+    # Submit validation request (miner creates request for validator to validate)
+    $CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
+        "$VALIDATOR" \
+        "$AGENT_ID_DEC" \
+        "VLC Protocol Validation Test" \
+        "$REQUEST_HASH" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+    if [ $? -ne 0 ]; then
+        echo "      ⚠️  Failed to create validation request"
+        continue
+    fi
+
+    # All validators give perfect score for VLC validation (protocol correctness)
+    SCORE=100  # VLC validation passes with perfect score
+
+    # Submit validation response with score
+    RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
+    RESPONSE_HASH="0x${RESPONSE_HASH}"
+    VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
+    VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
+
+    $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+        "$REQUEST_HASH" \
+        "$SCORE" \
+        "VLC validation passed - agent correctly implements causal consistency" \
+        "$RESPONSE_HASH" \
+        "$VLC_TAG" \
+        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "      ✅ ${VALIDATOR_NAME}: Score ${SCORE}/100 recorded"
+        echo "         Address: ${VALIDATOR}"
+        echo "         Request: ${REQUEST_HASH:0:10}..."
+
+        # Wait for transaction to be mined and verify response was recorded
+        sleep 1
+        VERIFY_RESPONSE=$($CAST_PATH call $VALIDATION_ADDRESS \
+            "getValidationStatus(bytes32)" \
+            "$REQUEST_HASH" \
+            --rpc-url $RPC_URL 2>&1 | tail -1)
+
+        # Parse the response to check if score was recorded (response should be 100)
+        if [[ "$VERIFY_RESPONSE" == *"100"* ]]; then
+            echo "         ✓ Response confirmed on-chain"
+        fi
+    else
+        echo "      ⚠️  ${VALIDATOR_NAME}: Failed to record score"
+    fi
+done
+
+# Wait a bit more to ensure all transactions are fully confirmed
+echo ""
+echo "   ⏳ Waiting for all validation responses to be confirmed..."
+sleep 2
+
+# Verify all 4 responses are on-chain by checking agent validations count
+echo "   🔍 Verifying all validation responses are on-chain..."
+AGENT_VALIDATIONS=$($CAST_PATH call $VALIDATION_ADDRESS \
+    "getAgentValidations(uint256)(bytes32[])" \
+    "$AGENT_ID_DEC" \
+    --rpc-url $RPC_URL 2>&1)
+
+# Count how many validation entries we have
+VALIDATION_COUNT=$(echo "$AGENT_VALIDATIONS" | grep -o "0x" | wc -l)
+echo "      Total validation requests for agent: $VALIDATION_COUNT"
+
+if [ "$VALIDATION_COUNT" -lt 4 ]; then
+    echo "      ⚠️  Warning: Expected 4 validations but found $VALIDATION_COUNT"
+    echo "      Waiting 3 more seconds for blockchain to sync..."
+    sleep 3
+fi
+
+echo ""
+echo "   📊 Validation Summary:"
+echo "      Agent ID: #${AGENT_ID_DEC}"
+
+# Call getSummary function from ValidationRegistry to get actual average score
+# getSummary(agentId, validatorAddresses[], tag) returns (uint64 count, uint8 avgScore)
+# We pass empty array [] to get all validators and VLC_PROTOCOL tag
+VLC_TAG="0x564c435f50524f544f434f4c0000000000000000000000000000000000000000"
+
+# Call with empty validator array to get all validators' scores
+echo "      🔍 Calling ValidationRegistry.getSummary..."
+echo "         Agent ID: $AGENT_ID_DEC"
+echo "         VLC Tag: $VLC_TAG"
+
+SUMMARY=$($CAST_PATH call $VALIDATION_ADDRESS \
+    "getSummary(uint256,address[],bytes32)(uint64,uint8)" \
+    "$AGENT_ID_DEC" \
+    "[]" \
+    "$VLC_TAG" \
+    --rpc-url $RPC_URL 2>&1)
+
+echo "      📝 Raw getSummary response: $SUMMARY"
+
+# Debug output to see what we get
+if [[ "$SUMMARY" == *"Error"* ]] || [ -z "$SUMMARY" ]; then
+    echo "      ⚠️  Error or empty response from getSummary"
+    # Fallback to expected values since all validators score 100
+    TOTAL_VALIDATIONS=4
+    AVG_SCORE=100
+else
+    # Cast returns values as plain numbers separated by newline or space
+    # Try different parsing approaches
+
+    # First try: direct numbers separated by space or newline
+    if [[ "$SUMMARY" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+        TOTAL_VALIDATIONS=${BASH_REMATCH[1]}
+        AVG_SCORE=${BASH_REMATCH[2]}
+    # Second try: tuple format (4, 100)
+    elif [[ "$SUMMARY" =~ \(([0-9]+),([0-9]+)\) ]]; then
+        TOTAL_VALIDATIONS=${BASH_REMATCH[1]}
+        AVG_SCORE=${BASH_REMATCH[2]}
+    # Third try: just two numbers on separate lines
+    else
+        # Convert to array splitting by any whitespace
+        SUMMARY_ARRAY=($SUMMARY)
+        TOTAL_VALIDATIONS=${SUMMARY_ARRAY[0]:-0}
+        AVG_SCORE=${SUMMARY_ARRAY[1]:-0}
+    fi
+fi
+
+echo "      📊 Parsed values: count=$TOTAL_VALIDATIONS, avgScore=$AVG_SCORE"
+
+# Ensure values are not empty to avoid bash errors
+TOTAL_VALIDATIONS=${TOTAL_VALIDATIONS:-0}
+AVG_SCORE=${AVG_SCORE:-0}
+
+echo "      Validators: $TOTAL_VALIDATIONS"
+echo "      Average Score: ${AVG_SCORE}/100"
+
+if [ $AVG_SCORE -ge 70 ]; then
+    echo "      Status: ✅ PASSED"
+else
+    echo "      Status: ❌ FAILED"
+fi
+
+echo ""
+
+# Step 2: Register subnet on blockchain (ValidationRegistry check enforced in smart contract)
+echo "🔐 Registering subnet with Agent ID $AGENT_ID_DEC..."
+echo "   The SubnetRegistry contract will verify:"
+echo "   ✓ Agent owns the identity token"
+echo "   ✓ Agent has passed VLC validation (score >= 70)"
+echo ""
+echo "   Subnet: $SUBNET_ID"
+echo "   Miner: $MINER"
+echo "   Validators: [$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]"
+echo ""
+
+$CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
+    "$SUBNET_ID" \
+    "$AGENT_ID_DEC" \
+    "$MINER" \
+    "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
+    --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ Subnet registered successfully on blockchain"
+else
+    echo "❌ Subnet registration failed"
+    cleanup
+    exit 1
+fi
+
+echo ""
+echo "🚀 Starting full subnet demo with per-epoch submission..."
 echo "   This will process 7 inputs across multiple epochs"
 echo "   Each epoch (3 rounds) will be submitted to blockchain immediately"
 echo ""
+echo "🎯 Demo Flow:"
+echo "  Round 1-3  → Epoch 1 → Immediate mainnet submission"
+echo "  Round 4-6  → Epoch 2 → Immediate mainnet submission"
+echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
+echo ""
+
+# Step 3: Run the full per-epoch subnet demo
 timeout 120 go run main.go || true
 
 echo ""

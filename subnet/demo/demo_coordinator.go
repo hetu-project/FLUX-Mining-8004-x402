@@ -113,6 +113,86 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 	}
 }
 
+// RunVLCValidation performs VLC protocol validation on the miner before allowing subnet operations.
+// This validates that the agent correctly implements Vector Logical Clock causality.
+// Returns true if validation passes, false otherwise.
+func (dc *DemoCoordinator) RunVLCValidation() bool {
+	fmt.Println("\n╔══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║              AGENT VLC PROTOCOL VALIDATION                  ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	// Collect validation results from all validators
+	var validationResults []*subnet.VLCValidationResult
+
+	// Each validator tests the miner
+	for i, validator := range dc.Validators {
+		fmt.Printf("═══ Validator %d Testing Agent ═══\n", i+1)
+
+		requestID := fmt.Sprintf("vlc-validation-test-%d", i+1)
+		test := validator.ValidateAgentVLC(dc.Miner, requestID)
+
+		result := validator.CreateVLCValidationResult(test)
+		validationResults = append(validationResults, result)
+
+		fmt.Println()
+	}
+
+	// Calculate aggregate score
+	avgScore, passed := subnet.GetVLCValidationSummary(validationResults)
+
+	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║              VLC VALIDATION SUMMARY                         ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	for i, result := range validationResults {
+		status := "✅"
+		if !result.Passed {
+			status = "❌"
+		}
+		fmt.Printf("  %s Validator-%d: %d/100\n", status, i+1, result.Score)
+	}
+
+	fmt.Println()
+	fmt.Printf("  Average Score: %d/100\n", avgScore)
+	fmt.Printf("  Pass Threshold: 70/100\n")
+	fmt.Println()
+
+	if passed {
+		fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+		fmt.Println("║        ✅ AGENT PASSED VLC PROTOCOL VALIDATION              ║")
+		fmt.Println("║                                                              ║")
+		fmt.Printf("║  Agent: %-52s ║\n", dc.Miner.ID)
+		fmt.Printf("║  Score: %d/100                                               ║\n", avgScore)
+		fmt.Println("║  Status: AUTHORIZED FOR SUBNET OPERATIONS                   ║")
+		fmt.Println("║                                                              ║")
+		fmt.Println("║  The agent has demonstrated correct VLC implementation:     ║")
+		fmt.Println("║  • Properly increments clock on each operation              ║")
+		fmt.Println("║  • Maintains causal consistency                             ║")
+		fmt.Println("║  • Implements NeedMoreInfo flow correctly                   ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+
+		// Reset miner's VLC clock for fresh start in actual subnet operations
+		dc.Miner.ResetClock()
+
+		return true
+	} else {
+		fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+		fmt.Println("║        ❌ AGENT FAILED VLC PROTOCOL VALIDATION              ║")
+		fmt.Println("║                                                              ║")
+		fmt.Printf("║  Agent: %-52s ║\n", dc.Miner.ID)
+		fmt.Printf("║  Score: %d/100 (Required: ≥70)                               ║\n", avgScore)
+		fmt.Println("║  Status: NOT AUTHORIZED                                     ║")
+		fmt.Println("║                                                              ║")
+		fmt.Println("║  The agent must fix VLC implementation before proceeding.   ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+		return false
+	}
+}
+
 // RunDemo executes the complete demo scenario using the separated core/demo architecture
 func (dc *DemoCoordinator) RunDemo() {
 	fmt.Printf("=== Starting Demo with Refactored Architecture ===\n")
@@ -163,9 +243,9 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 
 	fmt.Printf("User Input: %s\n", input)
 
-	// *** ROUND START: Validator-1 VLC increment for receiving user input ***
+	// *** ROUND START: User input (no VLC increment - user is external) ***
 	uiValidator := dc.Validators[0] // Validator-1 is the round orchestrator
-	uiValidator.IncrementValidatorClock() // Validator-1 VLC{2:++}
+	// NO VLC increment for user communication - user is external to subnet
 	fmt.Printf("Round %d: Started by Validator-1 receiving user input\n", inputNumber)
 
 	// Track user input that starts the round
@@ -210,10 +290,21 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 		}
 	}
 
-	// Step 1: Miner processes input (Miner VLC will increment)
-	// Sync miner's clock with validator's current state first
+	// Step 1: Validator sends request to miner
+	// VLC Protocol: +1 for message leaving validator to miner
+	uiValidator.IncrementValidatorClock()
+	fmt.Printf("Validator-1: Message leaving to miner → VLC incremented\n")
+
+	// Sync miner's clock with validator's current state
 	dc.Miner.UpdateValidatorClock(uiValidator.GetLastMinerClock())
-	minerResponse := dc.Miner.ProcessInput(input, inputNumber, requestID) // Miner VLC{1:++}
+
+	// Miner processes input (will increment twice: enter + leave)
+	minerResponse := dc.Miner.ProcessInput(input, inputNumber, requestID)
+
+	// Step 2: Validator receives response from miner
+	// VLC Protocol: +1 for message entering validator from miner
+	uiValidator.IncrementValidatorClock()
+	fmt.Printf("Validator-1: Message entered from miner → VLC incremented\n")
 
 	// Track miner's response (output or info request)
 	minerResponseEventID := dc.GraphAdapter.TrackMinerResponse(requestID, minerResponse, userInputEventID)
@@ -243,11 +334,8 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 	infoRequest := uiValidator.RequestMoreInfo(minerResponse.RequestID, minerResponse.InfoRequest)
 
 	if infoRequest != nil {
+		// Validator to User: NO VLC increment (user is external)
 		fmt.Printf("Validator %s asks user: %s\n", uiValidator.ID, infoRequest.Question)
-
-		// *** Validator-1 VLC increment for processing user's additional info ***
-		uiValidator.IncrementValidatorClock() // Validator-1 VLC{2:++}
-		fmt.Printf("Validator-1: Incremented VLC for processing user's additional context\n")
 
 		// Step 3: Simulate user providing additional info based on demo scenario
 		var additionalInfo string
@@ -258,14 +346,27 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 			additionalInfo = "Use REST API with JSON payloads, authentication via OAuth 2.0."
 		}
 
+		// User to Validator: NO VLC increment (user is external)
 		fmt.Printf("User provides: %s\n", additionalInfo)
 
-		// Track validator VLC increment for processing additional info
+		// Track validator state for processing additional info (no increment yet)
 		infoResponseEventID := dc.GraphAdapter.TrackInfoResponse(minerResponse.RequestID, additionalInfo, uiValidator.GetLastMinerClock(), parentEventID)
 
-		// Step 4: Sync miner with validator's updated VLC state and process additional info
+		// Step 4: Validator sends additional info to miner
+		// VLC Protocol: +1 for message leaving validator to miner
+		uiValidator.IncrementValidatorClock()
+		fmt.Printf("Validator-1: Additional info leaving to miner → VLC incremented\n")
+
+		// Sync miner with validator's updated VLC state
 		dc.Miner.UpdateValidatorClock(uiValidator.GetLastMinerClock())
-		finalResponse := dc.Miner.ProcessAdditionalInfo(originalInput, additionalInfo, inputNumber, minerResponse.RequestID) // Miner VLC{1:++}
+
+		// Miner processes additional info (will increment twice: enter + leave)
+		finalResponse := dc.Miner.ProcessAdditionalInfo(originalInput, additionalInfo, inputNumber, minerResponse.RequestID)
+
+		// Step 5: Validator receives final response from miner
+		// VLC Protocol: +1 for message entering validator from miner
+		uiValidator.IncrementValidatorClock()
+		fmt.Printf("Validator-1: Final response entered from miner → VLC incremented\n")
 
 		// Track miner VLC increment for final processing
 		finalProcessEventID := dc.GraphAdapter.TrackMinerResponse(minerResponse.RequestID, finalResponse, infoResponseEventID)
@@ -392,8 +493,8 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 		}
 	}
 
-	// *** ROUND END: Validator-1 VLC increment for final result aggregation ***
-	uiValidator.IncrementValidatorClock() // Validator-1 VLC{2:++}
+	// *** ROUND END: NO VLC increment (no message to/from miner, just user delivery) ***
+	// User is external to subnet, so no VLC increment
 	fmt.Printf("Round %d: Completed by Validator-1 aggregating final result\n", inputNumber)
 	
 	// Track comprehensive round completion with all actions in one VLC mutation

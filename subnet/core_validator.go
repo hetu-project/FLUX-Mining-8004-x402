@@ -125,7 +125,21 @@ func (v *CoreValidator) ValidateSequence(incomingClock *vlc.Clock, senderID uint
 		return true
 	}
 
-	// Validate +1 increment for the sender
+	// Miner messages should increment by 2 (enter + leave)
+	// Check if it's a +2 increment from the miner (senderID = 1)
+	if senderID == 1 {
+		expectedValue := v.MinerClock.Values[senderID] + 2
+		if incomingClock.Values[senderID] == expectedValue {
+			v.MinerClock.Merge([]*vlc.Clock{incomingClock})
+			fmt.Printf("Validator %s: VLC sequence validated (+2) for Miner - %v\n", v.ID, incomingClock.Values)
+			return true
+		}
+		fmt.Printf("Validator %s: VLC sequence error for Miner - expected +2 from %v, got %v\n",
+			v.ID, v.MinerClock.Values, incomingClock.Values)
+		return false
+	}
+
+	// Other senders might use +1 (future extension)
 	if v.MinerClock.IsPlusOneIncrement(incomingClock, senderID) {
 		v.MinerClock.Merge([]*vlc.Clock{incomingClock})
 		fmt.Printf("Validator %s: VLC sequence validated (+1) for %s - %v\n", v.ID, getParticipantName(senderID), incomingClock.Values)

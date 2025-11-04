@@ -1,4 +1,4 @@
-# FLUX Mining with ERC-8004 Identity & x402 Payment Escrow
+# FLUX Mining with ERC-8004 & x402 Payment Escrow
 
 A trustless AI agent infrastructure combining **ERC-8004 decentralized identity**, **x402 payment protocol**, and **Proof-of-Causal-Work consensus** to mine soulbound FLUX tokens through verified intelligence work. Features cryptographic agent verification, smart contract escrow payments with on-chain verification, Byzantine Fault Tolerant consensus, and Vector Logical Clock causal ordering for permissionless AI marketplaces.
 
@@ -15,11 +15,13 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 ### Key Features
 
 - 🧠 **Intelligence Mining**: Earn FLUX tokens through actual AI task completion
+- 🔐 **VLC Protocol Validation**: Mandatory on-chain validation before subnet registration
 - 💳 **x402 Escrow Payments**: Trustless USDC payments with BFT consensus-based release
 - 🔗 **Vector Logical Clocks**: Causal ordering of distributed consensus events
 - 🏛️ **Byzantine Fault Tolerant**: 4-validator consensus with quality assessment
 - 💎 **Soulbound Tokens**: Non-transferable but redeemable FLUX tokens
 - 🆔 **ERC-8004 Identity**: Trustless agent identity with NFT-based verification
+- ✅ **On-Chain Validation Registry**: Permanent record of agent validation scores
 - 📊 **Real-time Visualization**: VLC event graph via Dgraph
 - ⛓️ **Blockchain Integration**: Smart contracts on Anvil/Ethereum
 - 🔒 **Smart Contract Escrow**: Automatic payment release/refund based on validator consensus
@@ -36,7 +38,7 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 │                 │    │                  │    │                         │
 │ VLC Consensus   │    │ Per-epoch        │    │ • FLUX Mining            │
 └─────────────────┘    │ Submission       │    │ • Token Rewards         │
-         │             └──────────────────┘    │ • ERC-8004 Identity     │
+         │             └──────────────────┘    │ • ERC-8004              │
          ▼                                     │ • x402 Escrow Payments  │
 ┌─────────────────┐                            └─────────────────────────┘
 │   Dgraph        │                                        │
@@ -103,6 +105,26 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 - 🌐 Bridge API: `http://localhost:3001`
 
 **What You'll See**:
+- **VLC Protocol Validation**: Before subnet registration, agent undergoes VLC validation
+  ```
+  📋 VLC Protocol Validation
+
+  ✅ VLC VALIDATION PASSED
+  Agent: miner-1
+
+     📋 Validator-1 submitting validation...
+        ✅ Validator-1: Score 100/100 recorded
+     📋 Validator-2 submitting validation...
+        ✅ Validator-2: Score 100/100 recorded
+     ... [All 4 validators]
+
+     📊 Validation Summary:
+        Validators: 4
+        Average Score: 100/100
+        Status: ✅ PASSED
+
+  🔐 Registering subnet with Agent ID 0...
+  ```
 - **x402 Payment Requests**: Agent generates payment requests with task details
   ```
   📋 Agent sends x402 Payment Request to Client:
@@ -221,6 +243,141 @@ The web inspector at `http://localhost:3000/pocw-inspector.html` provides:
 - Check agent ID ownership and metadata
 - Track which agents are active in subnets
 - Monitor identity-verified FLUX mining rewards
+- Verify ValidationRegistry scores and VLC compliance
+
+## 🔐 VLC Protocol Validation System
+
+Before any agent can register a subnet and participate in FLUX mining, it **must pass VLC protocol validation** - a rigorous on-chain test ensuring proper implementation of Vector Logical Clock causal consistency.
+
+### Why VLC Validation Matters
+
+**Preventing Byzantine Failures**
+- Agents with incorrect VLC implementations can break causal ordering
+- Invalid clock increments corrupt the consensus mechanism
+- Malformed event sequences compromise network integrity
+- Validation ensures only protocol-compliant agents participate
+
+### Validation Process
+
+**📋 Pre-Registration Testing**
+
+The system performs VLC validation BEFORE subnet registration:
+
+```
+Flow:
+1. Agent registers identity NFT (ERC-8004)
+2. 🔐 VALIDATION CHECKPOINT: VLC Protocol Test
+   ├─ 4 validators send ambiguous tasks to agent
+   ├─ Agent must correctly implement NeedMoreInfo flow
+   ├─ VLC clock must increment properly (+2 per message exchange)
+   └─ Each validator submits score (0-100) to ValidationRegistry
+3. Validators submit scores to blockchain (permanent record)
+4. Smart contract verifies: getSummary(agentId) >= 70/100
+5. ✅ Only if validation passes → Subnet registration allowed
+```
+
+**⛓️ On-Chain Score Recording**
+
+All validation scores are permanently stored in the ValidationRegistry smart contract:
+
+```solidity
+// Each validator submits their assessment
+function validationResponse(
+    bytes32 requestHash,
+    uint8 response,        // Score: 0-100
+    string calldata responseUri,
+    bytes32 responseHash,
+    bytes32 tag           // "VLC_PROTOCOL" tag
+) external
+
+// Smart contract retrieves summary for subnet registration
+function getSummary(
+    uint256 agentId,
+    address[] calldata validatorAddresses,
+    bytes32 tag          // Filter by "VLC_PROTOCOL"
+) external view returns (
+    uint64 count,        // Number of validations
+    uint8 avgResponse    // Average score
+)
+```
+
+**✅ Pass/Fail Criteria**
+
+```
+SubnetRegistry.sol validation check:
+
+(uint64 totalValidations, uint8 avgScore) = validationRegistry.getSummary(
+    minerAgentId,
+    emptyValidators,  // Get all validators
+    VLC_PROTOCOL_TAG
+);
+
+require(totalValidations > 0, "Agent has no VLC validation scores");
+require(avgScore >= 70, "Agent validation score too low (min 70 required)");
+
+✅ PASSED:  avgScore >= 70 → Subnet registration proceeds
+❌ FAILED:  avgScore < 70  → Subnet registration blocked
+```
+
+### Validation Outcomes
+
+**Demo Results:**
+```bash
+📋 VLC Protocol Validation
+
+   📋 Validator-1 submitting validation...
+      ✅ Validator-1: Score 100/100 recorded
+         ✓ Response confirmed on-chain
+
+   📋 Validator-2 submitting validation...
+      ✅ Validator-2: Score 100/100 recorded
+         ✓ Response confirmed on-chain
+
+   📋 Validator-3 submitting validation...
+      ✅ Validator-3: Score 100/100 recorded
+         ✓ Response confirmed on-chain
+
+   📋 Validator-4 submitting validation...
+      ✅ Validator-4: Score 100/100 recorded
+         ✓ Response confirmed on-chain
+
+   📊 Validation Summary:
+      Agent ID: #0
+      🔍 Calling ValidationRegistry.getSummary...
+      📝 Raw getSummary response: 4
+100
+      📊 Parsed values: count=4, avgScore=100
+      Validators: 4
+      Average Score: 100/100
+      Status: ✅ PASSED
+
+🔐 Registering subnet with Agent ID 0...
+   The SubnetRegistry contract will verify:
+   ✓ Agent owns the identity token
+   ✓ Agent has passed VLC validation (score >= 70)
+```
+
+### Security Benefits
+
+**🛡️ Network Protection**
+- **Protocol Enforcement**: Only VLC-compliant agents can participate
+- **Permanent Record**: Validation scores stored on-chain forever
+- **No Bypass**: Smart contract enforces validation before registration
+- **Sybil Resistance**: Each agent ID validated independently
+
+**🔒 Trust Minimization**
+- **On-Chain Verification**: No off-chain trust required
+- **Validator Consensus**: Multiple independent validators assess agent
+- **Cryptographic Proof**: Blockchain provides immutable validation record
+- **Permissionless**: Any validator can assess any agent
+
+**📊 Inspector Integration**
+
+The blockchain inspector displays validation status:
+- View all validation requests for each agent
+- Check individual validator scores
+- Verify VLC_PROTOCOL tag compliance
+- Monitor average scores and pass/fail status
 
 ## 💳 x402 Payment System with Smart Escrow
 
@@ -467,9 +624,15 @@ After deployment, the system creates:
 
 ```json
 {
-  "AIUSD": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-  "x402PaymentEscrow": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
-  "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+  "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "ValidationRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "ReputationRegistry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "HETUToken": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  "FLUXToken": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+  "USDC": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  "SubnetRegistry": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+  "PoCWVerifier": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+  "x402PaymentEscrow": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"
 }
 ```
 
@@ -738,7 +901,8 @@ The system integrates multiple on-chain components for trustless operation:
 │               │      │                  │      │                 │
 │ • Agent ID: 0 │      │ • AIUSD Deposits │      │ • Soulbound NFT │
 │ • Identity    │◄─────│ • Payment Verify │      │ • Epoch Rewards │
-│ • Metadata    │      │ • Release/Refund │      │ • VLC Proof     │
+│ • Validation  │      │ • Release/Refund │      │ • VLC Proof     │
+│ • Metadata    │      │                  │      │                 │
 └───────────────┘      └──────────────────┘      └─────────────────┘
         │                         │                         │
         │                         │                         │
@@ -842,6 +1006,7 @@ Intelligence-FLUX-Mining/
 ├── subnet/                    # Go consensus implementation
 │   ├── core_miner.go         # AI miner agents
 │   ├── core_validator.go     # BFT validators
+│   ├── vlc_validation.go     # VLC protocol validation implementation
 │   ├── graph_adapter.go      # VLC graph & HTTP bridge integration
 │   ├── messages.go           # Protocol message definitions
 │   └── demo/                 # Demo scenarios & coordination

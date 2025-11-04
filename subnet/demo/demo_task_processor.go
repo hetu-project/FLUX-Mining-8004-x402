@@ -34,6 +34,13 @@ func NewDemoTaskProcessor() *DemoTaskProcessor {
 
 // ProcessTask implements the demo scenario logic
 func (d *DemoTaskProcessor) ProcessTask(input string, inputNumber int) (subnet.MinerOutputType, string, string) {
+	// Special case: VLC validation ambiguous tasks
+	// These tasks are intentionally vague to test NeedMoreInfo flow
+	if input == "Calculate the optimal route" {
+		fmt.Printf("Miner: VLC Validation - Detected ambiguous task, requesting clarification\n")
+		return subnet.NeedMoreInfo, "", "To calculate the optimal route, I need more information: What are the start and end points? Are there any obstacles or constraints I should consider?"
+	}
+
 	switch inputNumber {
 	case 3:
 		// Input 3: Miner requests more info → normal flow

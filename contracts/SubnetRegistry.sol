@@ -8,14 +8,30 @@ interface IIdentityRegistry {
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
+// Interface for ERC-8004 ValidationRegistry
+interface IValidationRegistry {
+    function getAgentValidations(uint256 agentId) external view returns (bytes32[] memory);
+    function getValidationStatus(bytes32 requestHash) external view returns (
+        address validator,
+        uint256 agentId,
+        uint8 score,
+        bytes32 responseHash,
+        bytes32 tag,
+        uint256 timestamp
+    );
+    function getSummary(uint256 agentId, address[] calldata validatorAddresses, bytes32 tag)
+        external view returns (uint64 count, uint8 avgResponse);
+}
+
 /**
  * @title Subnet Registry
- * @dev Subnet registration with ERC-8004 identity verification
- * Miners must provide their agent ID and ownership is verified
+ * @dev Subnet registration with ERC-8004 identity and validation verification
+ * Miners must provide their agent ID, prove ownership, and pass VLC validation
  */
 contract SubnetRegistry {
     HETUToken public hetuToken;
     IIdentityRegistry public identityRegistry;
+    IValidationRegistry public validationRegistry;
 
     struct Subnet {
         string subnetId;
@@ -38,6 +54,7 @@ contract SubnetRegistry {
     event SubnetRegistered(string subnetId, address miner, uint256 agentId, address[4] validators);
     event SubnetDeactivated(string subnetId);
     event IdentityVerified(address miner, uint256 agentId);
+    event ValidationVerified(uint256 agentId, uint256 avgScore, bool passed);
 
     address public owner;
     bool public initialized;
@@ -46,11 +63,12 @@ contract SubnetRegistry {
         owner = msg.sender;
     }
 
-    function initialize(address _hetuToken, address _identityRegistry) external {
+    function initialize(address _hetuToken, address _identityRegistry, address _validationRegistry) external {
         require(msg.sender == owner, "Only owner can initialize");
         require(!initialized, "Already initialized");
         hetuToken = HETUToken(_hetuToken);
         identityRegistry = IIdentityRegistry(_identityRegistry);
+        validationRegistry = IValidationRegistry(_validationRegistry);
         initialized = true;
     }
 
@@ -75,6 +93,25 @@ contract SubnetRegistry {
         address agentOwner = identityRegistry.ownerOf(minerAgentId);
         require(agentOwner == miner, "Miner does not own the provided agent ID");
         emit IdentityVerified(miner, minerAgentId);
+
+        // VALIDATION VERIFICATION: Check that the agent has passed VLC validation
+        // Create empty validator array to get all validators' scores
+        address[] memory emptyValidators = new address[](0);
+
+        // VLC_PROTOCOL tag in hex
+        bytes32 vlcProtocolTag = 0x564c435f50524f544f434f4c0000000000000000000000000000000000000000;
+
+        (uint64 totalValidations, uint8 avgScore) = validationRegistry.getSummary(
+            minerAgentId,
+            emptyValidators,
+            vlcProtocolTag
+        );
+
+        require(totalValidations > 0, "Agent has no VLC validation scores");
+
+        // Require minimum score of 70/100 to register subnet
+        require(avgScore >= 70, "Agent validation score too low (min 70 required)");
+        emit ValidationVerified(minerAgentId, uint256(avgScore), true);
 
         // Check that this agent ID is not already registered in another subnet
         require(bytes(agentIdToSubnet[minerAgentId]).length == 0, "Agent ID already registered in a subnet");
