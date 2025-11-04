@@ -118,10 +118,8 @@
             "IdentityRegistry": [
                 "function balanceOf(address) view returns (uint256)",
                 "function ownerOf(uint256) view returns (address)",
-                "function tokenOfOwnerByIndex(address, uint256) view returns (uint256)",
                 "function name() view returns (string)",
-                "function symbol() view returns (string)",
-                "function totalSupply() view returns (uint256)"
+                "function symbol() view returns (string)"
             ],
             "ValidationRegistry": [
                 "function getValidationStatus(bytes32) view returns (address,uint256,uint8,bytes32,bytes32,uint256)",
@@ -782,17 +780,8 @@
                 const identityABI = contractABIsByType.IdentityRegistry;
                 const identity = new ethers.Contract(identityAddress, identityABI, provider);
 
-                // Get total supply of identity tokens
-                let totalSupply;
-                try {
-                    totalSupply = await identity.totalSupply();
-                } catch {
-                    totalSupply = 0n;
-                }
-
                 let output = `
                     <div><span class="highlight">Identity Registry:</span> <span class="address">${identityAddress}</span></div>
-                    <div><span class="highlight">Total Agent IDs:</span> ${totalSupply.toString()}</div>
                     <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
                         <div class="highlight">📋 Registered Agents:</div>
                 `;
@@ -817,12 +806,19 @@
                             output += `<div><span class="highlight">Address:</span> <span class="address">${addr}</span></div>`;
                             output += `<div><span class="highlight">Agent IDs owned:</span> ${balance.toString()}</div>`;
 
-                            // Get all agent IDs for this owner
-                            for (let i = 0; i < Number(balance); i++) {
+                            // Get all agent IDs for this owner by checking sequential IDs (0-99)
+                            // IdentityRegistry doesn't have totalSupply, so we check a reasonable range
+                            const ownedTokens = [];
+                            for (let tokenId = 0; tokenId < 100; tokenId++) {
                                 try {
-                                    const tokenId = await identity.tokenOfOwnerByIndex(addr, i);
-                                    output += `<div style="margin-left: 20px;"><span class="highlight">Agent ID ${i}:</span> ${tokenId.toString()}</div>`;
-                                } catch {}
+                                    const owner = await identity.ownerOf(tokenId);
+                                    if (owner.toLowerCase() === addr.toLowerCase()) {
+                                        ownedTokens.push(tokenId);
+                                        output += `<div style="margin-left: 20px;"><span class="highlight">Agent ID:</span> ${tokenId}</div>`;
+                                    }
+                                } catch {
+                                    // Token doesn't exist, continue checking
+                                }
                             }
                             output += `</div>`;
                         }
@@ -863,16 +859,22 @@
                     output += `<div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">`;
                     output += `<div class="highlight">Agent IDs:</div>`;
 
-                    for (let i = 0; i < Number(balance); i++) {
+                    // Get all agent IDs by checking sequential IDs (0-99)
+                    // IdentityRegistry doesn't have totalSupply, so we check a reasonable range
+                    let foundTokens = 0;
+                    for (let tokenId = 0; tokenId < 100; tokenId++) {
                         try {
-                            const tokenId = await identity.tokenOfOwnerByIndex(address, i);
-                            output += `
-                                <div style="margin: 5px 0; padding: 8px; background: #111;">
-                                    <span class="highlight">Agent ID ${i}:</span> <span class="success">${tokenId.toString()}</span>
-                                </div>
-                            `;
+                            const owner = await identity.ownerOf(tokenId);
+                            if (owner.toLowerCase() === address.toLowerCase()) {
+                                output += `
+                                    <div style="margin: 5px 0; padding: 8px; background: #111;">
+                                        <span class="highlight">Agent ID:</span> <span class="success">${tokenId}</span>
+                                    </div>
+                                `;
+                                foundTokens++;
+                            }
                         } catch (error) {
-                            output += `<div class="error">Error getting token ${i}: ${error.message}</div>`;
+                            // Token doesn't exist, continue checking
                         }
                     }
                     output += `</div>`;
