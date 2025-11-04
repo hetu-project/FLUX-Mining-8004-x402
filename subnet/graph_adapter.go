@@ -481,26 +481,25 @@ func (sga *SubnetGraphAdapter) createEpochFinalization(validatorClock *vlc.Clock
 		}
 		
 		fmt.Printf("🚀 Epoch %d finalized - triggering mainnet submission\n", sga.epochCount)
-		
-		// Send epoch data to JavaScript bridge asynchronously
-		go func() {
-			// Try HTTP bridge first if URL is set
-			if sga.bridgeURL != "" {
-				fmt.Printf("📡 Sending Epoch %d data to JavaScript bridge...\n", epochData.EpochNumber)
-				if err := sga.sendEpochToBridge(epochData); err != nil {
-					fmt.Printf("❌ Failed to send epoch data to bridge: %v\n", err)
-					if sga.epochCallback != nil {
-						fmt.Printf("🔄 Falling back to callback method...\n")
-						sga.epochCallback(sga.epochCount, sga.SubnetID, epochData)
-					}
-				} else {
-					fmt.Printf("✅ Epoch %d submitted to mainnet via bridge!\n", epochData.EpochNumber)
+
+		// Send epoch data to JavaScript bridge synchronously
+		// This ensures epoch data submission completes BEFORE reputation feedback starts
+		// Try HTTP bridge first if URL is set
+		if sga.bridgeURL != "" {
+			fmt.Printf("📡 Sending Epoch %d data to JavaScript bridge...\n", epochData.EpochNumber)
+			if err := sga.sendEpochToBridge(epochData); err != nil {
+				fmt.Printf("❌ Failed to send epoch data to bridge: %v\n", err)
+				if sga.epochCallback != nil {
+					fmt.Printf("🔄 Falling back to callback method...\n")
+					sga.epochCallback(sga.epochCount, sga.SubnetID, epochData)
 				}
-			} else if sga.epochCallback != nil {
-				// Use callback method if no bridge URL
-				sga.epochCallback(sga.epochCount, sga.SubnetID, epochData)
+			} else {
+				fmt.Printf("✅ Epoch %d data submitted to mainnet via bridge!\n", epochData.EpochNumber)
 			}
-		}()
+		} else if sga.epochCallback != nil {
+			// Use callback method if no bridge URL
+			sga.epochCallback(sga.epochCount, sga.SubnetID, epochData)
+		}
 	}
 	
 	// Reset completed rounds and current round data for next epoch

@@ -78,6 +78,14 @@
         </div>
 
         <div class="section">
+            <h2>⭐ Reputation Registry</h2>
+            <p style="color: #888; margin: 10px 0;">View agent reputation scores from user feedback</p>
+            <input type="number" id="reputationAgentId" placeholder="Agent ID (e.g., 0)" style="width: 150px;">
+            <button class="btn" onclick="getAgentReputation()">Check Agent Reputation</button>
+            <div id="reputation-output" class="output">Enter Agent ID to check reputation scores...</div>
+        </div>
+
+        <div class="section">
             <h2>Account Inspector</h2>
             <input type="text" id="accountAddress" placeholder="Enter address (miner, validator, etc.)" style="width: 400px;">
             <button class="btn" onclick="getAccountInfo()">Get Account Info</button>
@@ -108,6 +116,7 @@
             "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
             "HETUToken": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
             "FLUXToken": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+            "ReputationRegistry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0", // Will be updated from contract_addresses.json
             "PaymentToken": "",  // Will be loaded from contract_addresses.json (USDC or AIUSD)
             "x402PaymentEscrow": "",  // Will be loaded from contract_addresses.json
             "SubnetRegistry": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
@@ -162,6 +171,12 @@
                 "function getSubnet(bytes32) view returns (tuple(address[],uint256,bool,uint256,uint256))",
                 "function verifyAndDistributeRewards(bytes32, uint256, bool) returns (bool)",
                 "function submitAndDistributeEpoch(string memory subnetId, bytes memory vlcGraphData, address[] memory successfulMiners, uint256 successfulTasks, uint256 failedTasks) external"
+            ],
+            "ReputationRegistry": [
+                "function getSummary(uint256,address[],bytes32,bytes32) view returns (uint64,uint8)",
+                "function scores(uint256,uint64) view returns (uint256,uint256,uint256)",
+                "function feedbackIndexes(uint256,address) view returns (uint64)",
+                "event FeedbackRecorded(uint256 indexed agentId, address indexed feedbackProvider, uint64 index, uint8 score, bytes32 tag1, bytes32 tag2)"
             ]
         };
 
@@ -195,6 +210,7 @@
                         contractAddresses.FLUXToken = addresses.FLUXToken || contractAddresses.FLUXToken;
                         contractAddresses.SubnetRegistry = addresses.SubnetRegistry || contractAddresses.SubnetRegistry;
                         contractAddresses.PoCWVerifier = addresses.PoCWVerifier || contractAddresses.PoCWVerifier;
+                        contractAddresses.ReputationRegistry = addresses.ReputationRegistry || contractAddresses.ReputationRegistry;
                         console.log("✅ Payment token loaded:", paymentTokenName);
                     } else {
                         // Fallback to old format (address -> name mapping)
@@ -887,6 +903,74 @@
             } catch (error) {
                 console.error("❌ Check error:", error);
                 document.getElementById('identity-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
+            }
+        }
+
+        // Reputation Registry Functions
+        async function getAgentReputation() {
+            try {
+                const agentIdInput = document.getElementById('reputationAgentId').value.trim();
+                if (!agentIdInput) {
+                    document.getElementById('reputation-output').innerHTML = `<div class="error">❌ Please enter an agent ID</div>`;
+                    return;
+                }
+
+                const agentId = parseInt(agentIdInput);
+                document.getElementById('reputation-output').innerHTML = `<div class="highlight">🔍 Loading reputation for Agent ID ${agentId}...</div>`;
+
+                const reputationAddress = contractAddresses.ReputationRegistry;
+                const reputationABI = contractABIsByType.ReputationRegistry;
+                const reputation = new ethers.Contract(reputationAddress, reputationABI, provider);
+
+                // Get agent reputation using getSummary
+                // Parameters: agentId, clientAddresses (empty array), tag1 (0x0), tag2 (0x0)
+                const [feedbackCount, avgScore] = await reputation.getSummary(
+                    agentId,
+                    [], // empty array for all clients
+                    "0x0000000000000000000000000000000000000000000000000000000000000000", // tag1 = 0
+                    "0x0000000000000000000000000000000000000000000000000000000000000000"  // tag2 = 0
+                );
+
+                let output = `
+                    <div><span class="highlight">Reputation Registry:</span> <span class="address">${reputationAddress}</span></div>
+                    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+                        <div class="highlight">📊 Agent ID ${agentId} Reputation:</div>
+                `;
+
+                if (feedbackCount > 0n) {
+                    const scorePercentage = (Number(avgScore) / 100 * 100).toFixed(1);
+
+                    output += `
+                        <div style="margin: 10px 0; padding: 10px; background: #111;">
+                            <div><span class="highlight">Total Feedback Count:</span> ${feedbackCount.toString()}</div>
+                            <div><span class="highlight">Average Score:</span> <span class="success">${avgScore.toString()}/100 (${scorePercentage}%)</span></div>
+                        </div>
+                    `;
+
+                    // Visual score indicator
+                    const barColor = avgScore >= 70 ? '#0f0' : avgScore >= 50 ? '#ff0' : '#f00';
+                    output += `
+                        <div style="margin: 10px 0;">
+                            <div class="highlight">Score Visualization:</div>
+                            <div style="width: 100%; height: 20px; background: #333; border: 1px solid #555; margin-top: 5px;">
+                                <div style="width: ${scorePercentage}%; height: 100%; background: ${barColor};"></div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    output += `
+                        <div class="error" style="margin: 10px 0;">
+                            ❌ No reputation feedback found for Agent ID ${agentId}
+                        </div>
+                    `;
+                }
+
+                output += `</div>`;
+                document.getElementById('reputation-output').innerHTML = output;
+
+            } catch (error) {
+                console.error("❌ Reputation check error:", error);
+                document.getElementById('reputation-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
             }
         }
 

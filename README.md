@@ -1,13 +1,15 @@
 # FLUX Mining with ERC-8004 & x402 Payment Escrow
 
-A trustless AI agent infrastructure combining **ERC-8004 decentralized identity**, **x402 payment protocol**, and **Proof-of-Causal-Work consensus** to mine soulbound FLUX tokens through verified intelligence work. Features cryptographic agent verification, smart contract escrow payments with on-chain verification, Byzantine Fault Tolerant consensus, and Vector Logical Clock causal ordering for permissionless AI marketplaces.
+A trustless AI agent infrastructure combining **ERC-8004 decentralized identity**, **VLC protocol validation**, **x402 payment protocol**, **reputation feedback system**, and **Proof-of-Causal-Work consensus** to mine soulbound FLUX tokens through verified intelligence work. Features mandatory on-chain VLC validation before subnet registration, smart contract escrow payments with on-chain verification, epoch-based reputation tracking with agent-signed FeedbackAuth, Byzantine Fault Tolerant consensus, and Vector Logical Clock causal ordering for permissionless AI marketplaces.
 
 ## Overview
 
-This system demonstrates a **permissionless AI marketplace** where agents earn soulbound FLUX tokens through verified intelligence work and receive stablecoin payments (USDC/AIUSD) via trustless escrow. Combines three key innovations:
+This system demonstrates a **permissionless AI marketplace** where agents earn soulbound FLUX tokens through verified intelligence work and receive stablecoin payments (USDC/AIUSD) via trustless escrow. Combines five key innovations:
 
 - **🆔 ERC-8004 Identity**: Decentralized agent registry with cryptographic verification and NFT-based identity
+- **🔐 VLC Protocol Validation**: Mandatory on-chain validation ensuring agents correctly implement Vector Logical Clock causal consistency (≥70/100 score required)
 - **💳 x402 Payment Protocol**: Trustless escrow with on-chain payment verification - agents verify funds before processing
+- **⭐ Reputation Feedback**: Epoch-based on-chain reputation tracking with agent-signed FeedbackAuth for trustless quality assessment
 - **⛏️ Proof-of-Causal-Work**: Byzantine Fault Tolerant consensus using Vector Logical Clocks for causal ordering
 
 The **FLUX token** represents verifiable intelligence contributions and is non-transferable (soulbound) but redeemable, while **stablecoins (USDC by default, configurable to AIUSD)** enable instant, cryptographically-secured payments between clients and agents without trusted intermediaries.
@@ -17,6 +19,7 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 - 🧠 **Intelligence Mining**: Earn FLUX tokens through actual AI task completion
 - 🔐 **VLC Protocol Validation**: Mandatory on-chain validation before subnet registration
 - 💳 **x402 Escrow Payments**: Trustless USDC payments with BFT consensus-based release
+- ⭐ **Reputation Feedback System**: Epoch-based on-chain reputation tracking with cryptographic FeedbackAuth
 - 🔗 **Vector Logical Clocks**: Causal ordering of distributed consensus events
 - 🏛️ **Byzantine Fault Tolerant**: 4-validator consensus with quality assessment
 - 💎 **Soulbound Tokens**: Non-transferable but redeemable FLUX tokens
@@ -80,18 +83,21 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 
 ### 2. FLUX Mining Mode 💰
 
-**Purpose**: Complete PoCW system with FLUX mining, x402 escrow payments, and ERC-8004 identity
+**Purpose**: Complete PoCW system with FLUX mining, VLC validation, x402 escrow payments, reputation feedback, and ERC-8004 identity
 
 **What it does**:
 - ✅ Everything from subnet-only mode PLUS:
-- ✅ Deploys smart contracts (FLUX, USDC, x402PaymentEscrow, ERC-8004 Identity, etc.)
+- ✅ Deploys smart contracts (FLUX, USDC, x402PaymentEscrow, ERC-8004 Identity, ReputationRegistry, etc.)
 - ✅ Real-time FLUX mining per epoch (every 3 rounds)
+- ✅ **VLC Protocol Validation**: Mandatory on-chain validation (≥70/100 score) before subnet registration
 - ✅ **x402 Trustless Escrow**: USDC payments with BFT consensus-based release/refund
 - ✅ **ERC-8004 Agent Identity**: NFT-based trustless agent verification
+- ✅ **Reputation Feedback System**: Epoch-based batch submission with agent-signed FeedbackAuth
 - ✅ Blockchain transactions with verified rewards
 - ✅ Bridge service for epoch submission
 - ✅ Complete FLUX and USDC balance tracking
 - ✅ Demonstrates 5 successful payments + 2 refunds via escrow
+- ✅ On-chain reputation tracking with 6 feedback submissions across 2 epochs
 
 **Run Command**:
 ```bash
@@ -143,7 +149,29 @@ The **FLUX token** represents verifiable intelligence contributions and is non-t
 - **FLUX Mining**: 400 FLUX to miner, 80 FLUX to validators per epoch
 - **BFT Consensus**: Validators decide payment release or refund
 - **Payment Outcomes**: 5 payments released (50 USDC), 2 refunded (20 USDC)
-- **Trustless Operation**: Complete audit trail of all payments on-chain
+- **Reputation Feedback**: Epoch-based batch submission after every 3 tasks
+  ```
+  ╔══════════════════════════════════════════════════════════════╗
+  ║           SUBMITTING EPOCH FEEDBACK TO BLOCKCHAIN          ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  📝 Task 1 (req-per-epoch-subnet-001-1): ✅ Success (TX: 0x47ed...)
+  📝 Task 2 (req-per-epoch-subnet-001-2): ✅ Success (TX: 0x7889...)
+  📝 Task 3 (req-per-epoch-subnet-001-3): ✅ Success (TX: 0x72fe...)
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║        ✅ EPOCH FEEDBACK BATCH SUBMITTED SUCCESSFULLY       ║
+  ║  Agent ID: 0 | Total Feedbacks: 3                           ║
+  ╚══════════════════════════════════════════════════════════════╝
+  ```
+- **Final Reputation Summary**: Retrieved from blockchain at end of demo
+  ```
+  📊 Agent ID 0 Reputation on Blockchain:
+    📝 Total Feedbacks Received: 6
+    ⭐ Average Score: 70/100 (Good Performance ✅)
+    📊 Score Visual: [███████████████████████░░░░░░░░░] 70%
+  ```
+- **Trustless Operation**: Complete audit trail of all payments and reputation on-chain
 
 ## Prerequisites
 
@@ -207,7 +235,7 @@ sudo ./run-flux-mining.sh --payment-token AIUSD
 | **PoCWVerifier** | Consensus verification & mining | Per-epoch FLUX distribution, validator authorization |
 | **IdentityRegistry** | ERC-8004 Trustless Agents identity | NFT-based agent IDs, ownership verification |
 | **ValidationRegistry** | Agent validation requests | Quality assessments, reputation tracking |
-| **ReputationRegistry** | Agent reputation system | Score tracking, signed attestations |
+| **ReputationRegistry** | Agent reputation feedback | Client feedback with FeedbackAuth, score tracking, reputation queries |
 
 ## ERC-8004 Identity Integration
 
@@ -654,6 +682,252 @@ Successful Task Completion:
 
 This dual-token model ensures agents build reputation (FLUX) while earning liquid compensation (AIUSD), creating the world's first **merit-based AI economy** with trustless payments.
 
+## ⭐ Reputation Feedback System
+
+The system implements a comprehensive **ERC-8004 reputation feedback mechanism** that allows clients to rate agent performance after task completion. This creates an immutable, on-chain record of agent quality over time.
+
+### Overview
+
+**🎯 Purpose**: Enable trustless, decentralized reputation tracking for AI agents based on actual task performance.
+
+**Key Features**:
+- ✅ **Off-Chain FeedbackAuth Generation**: Agent signs authorization, no blockchain transaction required
+- ✅ **On-Chain Reputation Storage**: Client submits feedback to ReputationRegistry smart contract
+- ✅ **Epoch-Based Batching**: Feedback submitted every 3 tasks
+- ✅ **Cryptographic Authorization**: Agent signs FeedbackAuth (289 bytes: 224 data + 65 signature)
+- ✅ **Score Tracking**: Performance scores recorded permanently on blockchain
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Reputation Feedback Flow (Per Task)                 │
+└─────────────────────────────────────────────────────────────────┘
+
+1️⃣ TASK COMPLETION PHASE
+   Agent                    Client                  Blockchain
+     │                        │                          │
+     ├─ Process Task ─────────▶                         │
+     │                        │                          │
+     ├─ Generate FeedbackAuth │                         │
+     │  (Sign off-chain)      │                          │
+     │                        │                          │
+     ├─ Send FeedbackAuth ───▶│                         │
+     │  (289 bytes)           │  ✓ Store locally        │
+     │                        │    (no gas cost)         │
+
+2️⃣ EPOCH ACCUMULATION (Tasks 1-3)
+     │                        │                          │
+     Task 1: FeedbackAuth generated & stored locally     │
+     Task 2: FeedbackAuth generated & stored locally     │
+     Task 3: FeedbackAuth generated & stored locally     │
+     │                        │                          │
+
+3️⃣ BATCH SUBMISSION PHASE (After 3 Tasks)
+     │                        │                          │
+     │                        ├─ Submit Batch ──────────▶│
+     │                        │   (3 feedbacks)          │
+     │                        │                          │ ReputationRegistry
+     │                        │                          ├─ Verify Signatures
+     │                        │                          ├─ Record Scores
+     │                        │                          └─ Emit Events
+     │                        │                          │
+     │                        │ ◄── Confirmation ────────┤
+     │                        │   (TX receipts)          │
+
+4️⃣ VERIFICATION PHASE
+     │                        │                          │
+     │ ◄─── Query Reputation ──────────────────────────┤
+     │      getSummary()      │                         │
+     │      (count, avgScore) │                         │
+```
+
+### FeedbackAuth Structure
+
+**🔐 Cryptographic Authorization (289 bytes)**
+
+The agent generates a signed authorization that allows the client to submit feedback:
+
+```go
+type FeedbackAuthData struct {
+    AgentId          *big.Int       // Agent ID (ERC-8004 identity)
+    ClientAddress    common.Address // Authorized client address
+    IndexLimit       uint64         // Progressive index (1, 2, 3...)
+    Expiry           *big.Int       // Authorization expiry timestamp
+    ChainId          *big.Int       // Network chain ID
+    IdentityRegistry common.Address // IdentityRegistry contract
+    SignerAddress    common.Address // Agent owner's address
+}
+
+// Signed using Ethereum message format:
+// signature = sign(keccak256("\x19Ethereum Signed Message:\n32" + messageHash))
+```
+
+**Authorization Process**:
+1. Agent encodes FeedbackAuth struct (224 bytes)
+2. Agent signs with private key (65 byte signature)
+3. Agent sends full 289-byte authorization to client
+4. Client stores locally (no gas cost)
+5. Client submits to blockchain when epoch completes
+
+### Scoring System
+
+**📊 Performance-Based Scores**
+
+```go
+func CalculateFeedbackScore(success bool) uint8 {
+    if success {
+        return 85  // Successful task completion
+    }
+    return 40  // Failed or rejected task
+}
+```
+
+**Task Success Criteria**:
+- ✅ **Success (85/100)**: Validator consensus accepts + User accepts output
+- ❌ **Failure (40/100)**: Validator consensus rejects OR User rejects output
+
+**Tags for Classification**:
+```go
+tag1 = keccak256("TASK_SUCCESS")  // or "TASK_FAILED"
+tag2 = keccak256("COMPUTE")       // Task type
+```
+
+### Epoch-Based Batch Submission
+
+**⚡ Gas Optimization Through Batching**
+
+Instead of submitting feedback after each task (expensive), the system batches 3 feedbacks per epoch:
+
+```
+Epoch 1: Tasks 1, 2, 3
+  ├─ Task 1 completes → Generate FeedbackAuth → Store locally
+  ├─ Task 2 completes → Generate FeedbackAuth → Store locally
+  └─ Task 3 completes → Generate FeedbackAuth → Submit all 3 to blockchain
+
+Epoch 2: Tasks 4, 5, 6
+  ├─ Task 4 completes → Generate FeedbackAuth → Store locally
+  ├─ Task 5 completes → Generate FeedbackAuth → Store locally
+  └─ Task 6 completes → Generate FeedbackAuth → Submit all 3 to blockchain
+```
+
+**Submission Timing**:
+1. ✅ Epoch data submitted to mainnet
+2. ✅ Reputation feedback batch submitted
+3. ✅ Next epoch begins
+
+### Smart Contract Integration
+
+**📝 ReputationRegistry.sol**
+
+```solidity
+// Client submits feedback with agent-signed authorization
+function giveFeedback(
+    uint256 agentId,
+    uint8 score,              // 0-100 performance score
+    bytes32 tag1,             // Primary classification tag
+    bytes32 tag2,             // Secondary classification tag
+    string calldata feedbackUri,
+    bytes32 feedbackHash,
+    bytes calldata feedbackAuth  // 289-byte signed authorization
+) external
+
+// Query agent's reputation summary
+function getSummary(
+    uint256 agentId,
+    address[] calldata clientAddresses,  // Empty = all clients
+    bytes32 tag1,                         // 0x0 = all tags
+    bytes32 tag2
+) external view returns (
+    uint64 count,           // Total feedback count
+    uint8 averageScore      // Average score (0-100)
+)
+```
+
+### Demo Output
+
+**📊 Epoch 1 Feedback Submission**:
+```bash
+╔══════════════════════════════════════════════════════════════╗
+║           SUBMITTING EPOCH FEEDBACK TO BLOCKCHAIN          ║
+╚══════════════════════════════════════════════════════════════╝
+
+📝 Task 1 (req-per-epoch-subnet-001-1): ✅ Success (TX: 0x47ed...)
+📝 Task 2 (req-per-epoch-subnet-001-2): ✅ Success (TX: 0x7889...)
+📝 Task 3 (req-per-epoch-subnet-001-3): ✅ Success (TX: 0x72fe...)
+
+╔══════════════════════════════════════════════════════════════╗
+║        ✅ EPOCH FEEDBACK BATCH SUBMITTED SUCCESSFULLY       ║
+║                                                              ║
+║  Agent ID: 0                                                 ║
+║  Total Feedbacks: 3                                          ║
+║  All feedback recorded on-chain in ReputationRegistry       ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+**🔄 Starting Epoch 2**
+
+**📊 Final Reputation Summary**:
+```bash
+╔══════════════════════════════════════════════════════════════╗
+║        🌟 FINAL AGENT REPUTATION SUMMARY                    ║
+║           (Read from ReputationRegistry)                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+📊 Agent ID 0 Reputation on Blockchain:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  📝 Total Feedbacks Received: 6
+  ⭐ Average Score: 70/100 (Good Performance ✅)
+  📊 Score Visual: [███████████████████████████████████░░░░░░░░░░░░░░░] 70%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Reputation data successfully retrieved from blockchain!
+```
+
+**Score Breakdown** (from demo with 7 tasks):
+- Task 1: 85 (Success)
+- Task 2: 85 (Success)
+- Task 3: 85 (Success)
+- Task 4: 40 (Validator rejection)
+- Task 5: 85 (Success)
+- Task 6: 40 (User rejection)
+- Task 7: 85 (Success)
+- **Average**: (85+85+85+40+85+40+85)/7 ≈ 72/100
+
+### Integration with FLUX Mining
+
+**🔗 Parallel Operation**
+
+The reputation system operates alongside FLUX mining and x402 payments:
+
+```
+Task Completion:
+  ├─ x402 Payment: USDC released from escrow (immediate economic reward)
+  ├─ FLUX Tokens: Mined at epoch boundary (long-term reputation token)
+  └─ Reputation: Feedback recorded on-chain (permanent quality record)
+```
+
+**Why All Three?**
+- **x402 Payments**: Immediate compensation for work performed
+- **FLUX Tokens**: Soulbound reputation, cannot be transferred
+- **Reputation Scores**: Public quality metrics for client decision-making
+
+### Benefits
+
+**For Clients**:
+- ✅ Verify agent quality before engaging
+- ✅ Transparent performance history
+- ✅ Protection against low-quality agents
+
+**For Agents**:
+- ✅ Build verifiable reputation over time
+- ✅ Differentiate through quality metrics
+- ✅ Earn trust through demonstrated performance
+
+**For the Network**:
+- ✅ Quality-based agent discovery
+- ✅ Market-driven quality improvement
+- ✅ Trustless reputation without central authority
+
 ## Expected Output
 
 ### Subnet-Only Mode
@@ -892,40 +1166,35 @@ The system integrates multiple on-chain components for trustless operation:
 │                         (Anvil Local Testnet)                   │
 └─────────────────────────────────────────────────────────────────┘
                                   │
-        ┌─────────────────────────┼─────────────────────────┐
-        │                         │                         │
-        ▼                         ▼                         ▼
-┌───────────────┐      ┌──────────────────┐      ┌─────────────────┐
-│ ERC-8004      │      │ x402 Payment     │      │ FLUX Token      │
-│ Agent Registry│      │ Escrow Contract  │      │ Mining Contract │
-│               │      │                  │      │                 │
-│ • Agent ID: 0 │      │ • AIUSD Deposits │      │ • Soulbound NFT │
-│ • Identity    │◄─────│ • Payment Verify │      │ • Epoch Rewards │
-│ • Validation  │      │ • Release/Refund │      │ • VLC Proof     │
-│ • Metadata    │      │                  │      │                 │
-└───────────────┘      └──────────────────┘      └─────────────────┘
-        │                         │                         │
-        │                         │                         │
-        └─────────────────────────┼─────────────────────────┘
-                                  │
-                                  ▼
-                    ┌─────────────────────────┐
-                    │   AIUSD Stablecoin      │
-                    │   (ERC-20 Token)        │
-                    │                         │
-                    │ • Client Payments       │
-                    │ • Agent Compensation    │
-                    │ • Escrow Transfers      │
-                    └─────────────────────────┘
+        ┌─────────────┬───────────┼───────────┬─────────────┐
+        │             │           │           │             │
+        ▼             ▼           ▼           ▼             ▼
+┌──────────────┐ ┌──────────┐ ┌─────────┐ ┌──────────┐ ┌─────────┐
+│ ERC-8004     │ │ VLC      │ │ x402    │ │ FLUX     │ │ USDC    │
+│ Registries   │ │ Valid.   │ │ Payment │ │ Token    │ │ Stable  │
+│              │ │ Registry │ │ Escrow  │ │ Mining   │ │ coin    │
+│ • Identity   │ │          │ │         │ │          │ │         │
+│ • Validation │ │ • Score  │ │ • USDC  │ │ • Soul-  │ │ • Pay   │
+│ • Reputation │ │ • Pass/  │ │   Lock  │ │   bound  │ │   ments │
+│              │ │   Fail   │ │ • BFT   │ │ • Epoch  │ │ • Comp  │
+│              │ │ • ≥70    │ │   Vote  │ │   Reward │ │   ensat │
+└──────────────┘ └──────────┘ └─────────┘ └──────────┘ └─────────┘
+        │             │           │           │             │
+        └─────────────┴───────────┴───────────┴─────────────┘
 
-📊 Payment & Mining Flow:
-1. Agent generates x402 payment request
-2. Client deposits AIUSD to escrow contract
-3. Agent verifies payment on-chain (trustless)
-4. Agent processes task after verification
-5. BFT validators reach consensus on quality
-6. Escrow releases payment OR refunds client
-7. FLUX tokens mined based on epoch completion
+📊 Complete Agent Lifecycle Flow:
+1. Agent registers identity NFT (ERC-8004 IdentityRegistry)
+2. Agent passes VLC validation (ValidationRegistry, score ≥70/100)
+3. Agent registers subnet and begins mining
+4. Agent generates x402 payment request for each task
+5. Client deposits USDC to escrow contract
+6. Agent verifies payment on-chain (trustless)
+7. Agent processes task after verification
+8. BFT validators reach consensus on quality
+9. Escrow releases payment OR refunds client
+10. Agent generates FeedbackAuth for client (off-chain signature)
+11. Client submits reputation feedback batch (ReputationRegistry)
+12. FLUX tokens mined based on epoch completion
 ```
 
 ## 💰 Intelligence Money (FLUX Tokens)
@@ -1008,6 +1277,8 @@ Intelligence-FLUX-Mining/
 │   ├── core_validator.go     # BFT validators
 │   ├── vlc_validation.go     # VLC protocol validation implementation
 │   ├── graph_adapter.go      # VLC graph & HTTP bridge integration
+│   ├── reputation_feedback.go # Reputation feedback auth & batch submission
+│   ├── payment_coordinator.go # x402 payment system integration
 │   ├── messages.go           # Protocol message definitions
 │   └── demo/                 # Demo scenarios & coordination
 │       ├── demo_coordinator.go      # Demo orchestration

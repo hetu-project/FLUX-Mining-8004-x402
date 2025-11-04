@@ -30,12 +30,14 @@ import (
 //   - Processes 7 predefined inputs with known expected outcomes
 //   - Demonstrates both normal processing and info request scenarios
 type DemoCoordinator struct {
-	SubnetID       string                      // Unique identifier for this demo subnet
-	Miner          *subnet.CoreMiner           // AI agent processing tasks
-	Validators     []*subnet.CoreValidator     // Quality assessment and consensus nodes
-	userInputs     []string                    // Predefined demo inputs for consistent testing
-	GraphAdapter   *subnet.SubnetGraphAdapter  // Graph adapter for VLC event visualization
-	PaymentCoord   *subnet.PaymentCoordinator  // x402 payment system integration
+	SubnetID          string                               // Unique identifier for this demo subnet
+	Miner             *subnet.CoreMiner                    // AI agent processing tasks
+	Validators        []*subnet.CoreValidator              // Quality assessment and consensus nodes
+	userInputs        []string                             // Predefined demo inputs for consistent testing
+	GraphAdapter      *subnet.SubnetGraphAdapter           // Graph adapter for VLC event visualization
+	PaymentCoord      *subnet.PaymentCoordinator           // x402 payment system integration
+	ReputationMgr     *subnet.ReputationFeedbackManager    // Reputation feedback auth generation
+	ReputationSubmitter *subnet.ReputationBatchSubmitter   // Reputation feedback batch submission
 }
 
 // NewDemoCoordinator creates a new demo coordinator with all PoC-specific logic
@@ -95,12 +97,56 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 		fmt.Printf("   Minimum payment: 10 %s\n", paymentCoord.GetPaymentTokenName())
 	}
 
+	// Initialize reputation feedback manager
+	fmt.Println("⭐ Initializing Reputation Feedback System...")
+	// IdentityRegistry address from contract_addresses.json
+	identityRegistryAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+
+	reputationMgr, err := subnet.NewReputationFeedbackManager(
+		0, // Agent ID 0 (Miner)
+		"0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", // Miner's private key (Anvil account #5: 0x9965...)
+		common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"), // Client address (Validator2/Anvil#2)
+		identityRegistryAddr,
+		31337, // Local testnet chain ID
+	)
+	if err != nil {
+		fmt.Printf("⚠️  Reputation system initialization failed: %v\n", err)
+		fmt.Println("   Continuing without reputation feedback...")
+		reputationMgr = nil
+	} else {
+		fmt.Println("✅ Reputation feedback auth generation initialized")
+	}
+
+	// Initialize reputation batch submitter (client-side)
+	var reputationSubmitter *subnet.ReputationBatchSubmitter
+	if reputationMgr != nil {
+		// ReputationRegistry address from contract_addresses.json
+		reputationRegistryAddr := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+
+		submitter, err := subnet.NewReputationBatchSubmitter(
+			"http://localhost:8545",
+			reputationRegistryAddr,
+			"0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a", // Client's private key (Validator2/Anvil#2)
+			31337, // Local testnet chain ID
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Reputation batch submitter initialization failed: %v\n", err)
+			fmt.Println("   Continuing without batch submission...")
+			reputationSubmitter = nil
+		} else {
+			reputationSubmitter = submitter
+			fmt.Println("✅ Reputation batch submitter initialized")
+		}
+	}
+
 	return &DemoCoordinator{
-		SubnetID:     subnetID,
-		Miner:        miner,
-		Validators:   validators,
-		GraphAdapter: graphAdapter,
-		PaymentCoord: paymentCoord,
+		SubnetID:            subnetID,
+		Miner:               miner,
+		Validators:          validators,
+		GraphAdapter:        graphAdapter,
+		PaymentCoord:        paymentCoord,
+		ReputationMgr:       reputationMgr,
+		ReputationSubmitter: reputationSubmitter,
 		userInputs: []string{
 			"Analyze market trends for Q4",
 			"Generate summary report for project Alpha",
@@ -510,7 +556,40 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 	)
 
 	fmt.Printf("Final result: %s\n", finalResult)
-	
+
+	// *** REPUTATION: Generate FeedbackAuth for client after task completion ***
+	if dc.ReputationMgr != nil {
+		taskSuccess := sharedAssessment.IsAccepted() && userAccepts
+		_, err := dc.ReputationMgr.GenerateFeedbackAuth(
+			minerResponse.RequestID,
+			inputNumber,
+			taskSuccess,
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Failed to generate FeedbackAuth: %v\n", err)
+		}
+
+		// Check if epoch is complete (every 3 tasks)
+		if dc.ReputationMgr.IsEpochComplete() {
+			fmt.Printf("\n📊 Epoch %d Complete! Ready for batch feedback submission\n", dc.ReputationMgr.CurrentEpoch)
+			dc.ReputationMgr.PrintEpochSummary(dc.ReputationMgr.CurrentEpoch)
+
+			// Automatically submit batch feedback to blockchain
+			if dc.ReputationSubmitter != nil {
+				tasks := dc.ReputationMgr.GetCurrentEpochFeedbacks()
+				err := dc.ReputationSubmitter.SubmitEpochFeedback(dc.ReputationMgr.AgentID, tasks)
+				if err != nil {
+					fmt.Printf("⚠️  Failed to submit epoch feedback: %v\n", err)
+				}
+			}
+
+			// Start next epoch
+			if inputNumber < 7 { // More tasks remaining
+				dc.ReputationMgr.StartNextEpoch()
+			}
+		}
+	}
+
 	// Sync miner with final validator state
 	dc.Miner.UpdateValidatorClock(uiValidator.GetLastMinerClock())
 	fmt.Printf("Round %d: VLC synchronization complete\n", inputNumber)

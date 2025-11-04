@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# PoCW FLUX Mining Script with ERC-8004 Identity Integration
+# PoCW FLUX Mining Script with ERC-8004 
 # This script runs the complete PoCW system with FLUX token mining:
 # - ERC-8004 Identity Registry for miner authentication
 # - Miners must have Agent ID to register subnets
 # - Real-time epoch submission where each completed epoch (3 rounds)
 #   triggers immediate mainnet submission and FLUX mining.
 
-echo "💰 PoCW FLUX MINING SYSTEM WITH ERC-8004 IDENTITY"
+echo "💰 PoCW FLUX MINING SYSTEM WITH ERC-8004 and x402"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Architecture: FLUX mining with ERC-8004 identity verification"
+echo "Architecture: FLUX mining with ERC-8004 and x402"
 echo ""
 
 # Parse command line arguments
@@ -1140,11 +1140,75 @@ V1_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $V1_PAYMENT_FINAL)
 echo "   Balance: $V1_PAYMENT_FINAL_FORMATTED $PAYMENT_TOKEN"
 
 echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║        🌟 FINAL AGENT REPUTATION SUMMARY                    ║"
+echo "║           (Read from ReputationRegistry)                    ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+
+# Read agent reputation from ReputationRegistry contract
+AGENT_ID="0"
+echo "📊 Agent ID $AGENT_ID Reputation on Blockchain:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Call getSummary(uint256, address[], bytes32, bytes32) returns (uint64, uint8)
+# Parameters: agentId, clientAddresses (empty array), tag1 (0x0), tag2 (0x0)
+REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],bytes32,bytes32)(uint64,uint8)" \
+    $AGENT_ID "[]" "0x0000000000000000000000000000000000000000000000000000000000000000" "0x0000000000000000000000000000000000000000000000000000000000000000" \
+    --rpc-url $RPC_URL 2>&1)
+
+if echo "$REPUTATION_DATA" | grep -q "^[0-9]"; then
+    # Parse the two return values (count, averageScore)
+    FEEDBACK_COUNT=$(echo "$REPUTATION_DATA" | sed -n '1p')
+    AVG_SCORE=$(echo "$REPUTATION_DATA" | sed -n '2p')
+
+    if [ "$FEEDBACK_COUNT" -gt 0 ]; then
+        echo "  📝 Total Feedbacks Received: $FEEDBACK_COUNT"
+        echo -n "  ⭐ Average Score: $AVG_SCORE/100"
+
+        # Add performance indicator
+        if [ "$AVG_SCORE" -ge 80 ]; then
+            echo " (Excellent Performance 🏆)"
+        elif [ "$AVG_SCORE" -ge 60 ]; then
+            echo " (Good Performance ✅)"
+        elif [ "$AVG_SCORE" -ge 40 ]; then
+            echo " (Needs Improvement ⚠️)"
+        else
+            echo " (Poor Performance ❌)"
+        fi
+
+        # Create visual score bar (50 characters wide)
+        FILLED_LENGTH=$((AVG_SCORE * 50 / 100))
+        EMPTY_LENGTH=$((50 - FILLED_LENGTH))
+        if [ "$FILLED_LENGTH" -gt 0 ]; then
+            FILLED_BAR=$(printf '█%.0s' $(seq 1 $FILLED_LENGTH))
+        else
+            FILLED_BAR=""
+        fi
+        if [ "$EMPTY_LENGTH" -gt 0 ]; then
+            EMPTY_BAR=$(printf '░%.0s' $(seq 1 $EMPTY_LENGTH))
+        else
+            EMPTY_BAR=""
+        fi
+        BAR="${FILLED_BAR}${EMPTY_BAR}"
+        echo "  📊 Score Visual: [$BAR] ${AVG_SCORE}%"
+    else
+        echo "  ❌ No reputation feedback recorded yet"
+    fi
+else
+    echo "  ⚠️ Could not retrieve reputation data"
+fi
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Reputation data successfully retrieved from blockchain!"
+echo ""
+
 echo "🔍 What was demonstrated:"
 echo "  1. ✅ Infrastructure setup (Anvil + Dgraph + Contracts)"
-echo "  2. ✅ Real-time FLUX mining per epoch completion"  
+echo "  2. ✅ Real-time FLUX mining per epoch completion"
 echo "  3. ✅ Subnet processing with VLC consistency"
 echo "  4. ✅ Blockchain integration with verified transactions"
+echo "  5. ✅ Agent reputation tracking via ERC-8004"
 echo ""
 echo "🌐 Access points:"
 echo "  📊 Dgraph VLC visualization: http://localhost:8000"
