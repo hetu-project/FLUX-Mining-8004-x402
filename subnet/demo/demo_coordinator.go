@@ -13,6 +13,8 @@ package demo
 import (
 	"fmt"
 	"math/big"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -30,14 +32,14 @@ import (
 //   - Processes 7 predefined inputs with known expected outcomes
 //   - Demonstrates both normal processing and info request scenarios
 type DemoCoordinator struct {
-	SubnetID          string                               // Unique identifier for this demo subnet
-	Miner             *subnet.CoreMiner                    // AI agent processing tasks
-	Validators        []*subnet.CoreValidator              // Quality assessment and consensus nodes
-	userInputs        []string                             // Predefined demo inputs for consistent testing
-	GraphAdapter      *subnet.SubnetGraphAdapter           // Graph adapter for VLC event visualization
-	PaymentCoord      *subnet.PaymentCoordinator           // x402 payment system integration
-	ReputationMgr     *subnet.ReputationFeedbackManager    // Reputation feedback auth generation
-	ReputationSubmitter *subnet.ReputationBatchSubmitter   // Reputation feedback batch submission
+	SubnetID            string                            // Unique identifier for this demo subnet
+	Miner               *subnet.CoreMiner                 // AI agent processing tasks
+	Validators          []*subnet.CoreValidator           // Quality assessment and consensus nodes
+	userInputs          []string                          // Predefined demo inputs for consistent testing
+	GraphAdapter        *subnet.SubnetGraphAdapter        // Graph adapter for VLC event visualization
+	PaymentCoord        *subnet.PaymentCoordinator        // x402 payment system integration
+	ReputationMgr       *subnet.ReputationFeedbackManager // Reputation feedback auth generation
+	ReputationSubmitter *subnet.ReputationBatchSubmitter  // Reputation feedback batch submission
 }
 
 // NewDemoCoordinator creates a new demo coordinator with all PoC-specific logic
@@ -71,72 +73,134 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 	// Create graph adapter for visualization
 	graphAdapter := subnet.NewSubnetGraphAdapter(subnetID, 1, "subnet-coordinator")
 
-	// Initialize payment coordinator (x402 payment system)
-	fmt.Println("💰 Initializing x402 Payment System...")
-	paymentCoord, err := subnet.NewPaymentCoordinator(
-		"http://localhost:8545",
-		"contract_addresses.json",
-		"0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", // V1 Coordinator key
-	)
-	if err != nil {
-		fmt.Printf("⚠️  Payment system unavailable: %v\n", err)
-		fmt.Println("   Continuing without payment integration...")
-		paymentCoord = nil
-	} else {
-		fmt.Println("✅ Payment coordinator initialized successfully")
-		// Set payment coordinator in UI validator (validator-1)
-		validators[0].SetPaymentCoordinator(paymentCoord)
+	// Check if running in subnet-only mode (skip payment and reputation systems)
+	subnetOnlyMode := os.Getenv("SUBNET_ONLY_MODE") == "true"
 
-		// Configure miner with payment verification (trustless operation)
-		// Miner will verify payment is locked in escrow before processing tasks
-		agentAddress := "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc" // Agent address from contract_addresses.json
-		minPayment := "10000000000000000000" // 10 tokens minimum (10 * 10^18 wei)
-		miner.SetPaymentVerifier(paymentCoord, agentAddress, minPayment)
-		fmt.Printf("🔐 Miner configured with payment verification\n")
-		fmt.Printf("   Agent address: %s\n", agentAddress)
-		fmt.Printf("   Minimum payment: 10 %s\n", paymentCoord.GetPaymentTokenName())
+	// Get RPC URL for blockchain interactions (used by payment and reputation systems)
+	rpcURL := os.Getenv("RPC_URL")
+	if rpcURL == "" {
+		rpcURL = "http://localhost:8545" // Default to localhost if not set
 	}
 
-	// Initialize reputation feedback manager
-	fmt.Println("⭐ Initializing Reputation Feedback System...")
-	// IdentityRegistry address from contract_addresses.json
-	identityRegistryAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	var paymentCoord *subnet.PaymentCoordinator
+	if !subnetOnlyMode {
+		// Initialize payment coordinator (x402 payment system)
+		fmt.Println("💰 Initializing x402 Payment System...")
 
-	reputationMgr, err := subnet.NewReputationFeedbackManager(
-		0, // Agent ID 0 (Miner)
-		"0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", // Miner's private key (Anvil account #5: 0x9965...)
-		common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"), // Client address (Validator2/Anvil#2)
-		identityRegistryAddr,
-		31337, // Local testnet chain ID
-	)
-	if err != nil {
-		fmt.Printf("⚠️  Reputation system initialization failed: %v\n", err)
-		fmt.Println("   Continuing without reputation feedback...")
-		reputationMgr = nil
-	} else {
-		fmt.Println("✅ Reputation feedback auth generation initialized")
-	}
+		// V1 Coordinator key - use environment or fallback to local
+		v1CoordKey := os.Getenv("VALIDATOR_1_KEY")
+		if v1CoordKey == "" {
+			v1CoordKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+		}
 
-	// Initialize reputation batch submitter (client-side)
-	var reputationSubmitter *subnet.ReputationBatchSubmitter
-	if reputationMgr != nil {
-		// ReputationRegistry address from contract_addresses.json
-		reputationRegistryAddr := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
-
-		submitter, err := subnet.NewReputationBatchSubmitter(
-			"http://localhost:8545",
-			reputationRegistryAddr,
-			"0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a", // Client's private key (Validator2/Anvil#2)
-			31337, // Local testnet chain ID
+		var err error
+		paymentCoord, err = subnet.NewPaymentCoordinator(
+			rpcURL,
+			"contract_addresses.json",
+			v1CoordKey,
 		)
 		if err != nil {
-			fmt.Printf("⚠️  Reputation batch submitter initialization failed: %v\n", err)
-			fmt.Println("   Continuing without batch submission...")
-			reputationSubmitter = nil
+			fmt.Printf("⚠️  Payment system unavailable: %v\n", err)
+			fmt.Println("   Continuing without payment integration...")
+			paymentCoord = nil
 		} else {
-			reputationSubmitter = submitter
-			fmt.Println("✅ Reputation batch submitter initialized")
+			fmt.Println("✅ Payment coordinator initialized successfully")
+			// Set payment coordinator in UI validator (validator-1)
+			validators[0].SetPaymentCoordinator(paymentCoord)
+
+			// Configure miner with payment verification (trustless operation)
+			// Miner will verify payment is locked in escrow before processing tasks
+			// Agent address - use environment or fallback to local
+			agentAddress := os.Getenv("MINER_ADDRESS")
+			if agentAddress == "" {
+				agentAddress = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+			}
+			minPayment := "10000000" // 10 tokens minimum (10 * 10^6 wei for USDC decimals)
+			miner.SetPaymentVerifier(paymentCoord, agentAddress, minPayment)
+			fmt.Printf("🔐 Miner configured with payment verification\n")
+			fmt.Printf("   Agent address: %s\n", agentAddress)
+			fmt.Printf("   Minimum payment: 10 %s\n", paymentCoord.GetPaymentTokenName())
 		}
+	} else {
+		fmt.Println("⏭️  Skipping payment system initialization (subnet-only mode)")
+		paymentCoord = nil
+	}
+
+	var reputationManager *subnet.ReputationFeedbackManager
+	var reputationSubmitter *subnet.ReputationBatchSubmitter
+	if !subnetOnlyMode {
+		// Initialize reputation feedback manager
+		fmt.Println("⭐ Initializing Reputation Feedback System...")
+		// IdentityRegistry address from contract_addresses.json
+		identityRegistryAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+
+		// Get chain ID from environment or default to 31337 (local)
+		chainIDStr := os.Getenv("CHAIN_ID")
+		chainIDValue := uint64(31337) // Default to local
+		if chainIDStr != "" {
+			if parsedChainID, err := strconv.ParseUint(chainIDStr, 10, 64); err == nil {
+				chainIDValue = parsedChainID
+			}
+		}
+
+		// Get miner key from environment or fallback to local
+		minerKey := os.Getenv("MINER_KEY")
+		if minerKey == "" {
+			minerKey = "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
+		}
+
+		// Get client address from environment or fallback to Sepolia
+		clientAddr := os.Getenv("CLIENT_ADDRESS")
+		if clientAddr == "" {
+			clientAddr = "0xfA6EC9Cf1E293A91a8ea2EdCc4A2324d48129821" // Sepolia client with USDC
+		}
+
+		reputationMgr, err := subnet.NewReputationFeedbackManager(
+			0,                               // Agent ID 0 (Miner)
+			minerKey,                        // Miner's private key - from environment or local fallback
+			common.HexToAddress(clientAddr), // Client address - from environment or local fallback
+			identityRegistryAddr,
+			chainIDValue, // Use environment chain ID or default
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Reputation system initialization failed: %v\n", err)
+			fmt.Println("   Continuing without reputation feedback...")
+			reputationMgr = nil
+		} else {
+			fmt.Println("✅ Reputation feedback auth generation initialized")
+		}
+
+		// Initialize reputation batch submitter (client-side)
+		if reputationMgr != nil {
+			// ReputationRegistry address from contract_addresses.json
+			reputationRegistryAddr := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+
+			// Get client key from environment or fallback to Sepolia
+			clientKey := os.Getenv("CLIENT_KEY")
+			if clientKey == "" {
+				clientKey = "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97" // Sepolia client key
+			}
+
+			submitter, err := subnet.NewReputationBatchSubmitter(
+				rpcURL, // Use RPC URL from environment
+				reputationRegistryAddr,
+				clientKey,    // Client's private key - from environment or local fallback
+				chainIDValue, // Use environment chain ID or default
+			)
+			if err != nil {
+				fmt.Printf("⚠️  Reputation batch submitter initialization failed: %v\n", err)
+				fmt.Println("   Continuing without batch submission...")
+				reputationSubmitter = nil
+			} else {
+				reputationSubmitter = submitter
+				fmt.Println("✅ Reputation batch submitter initialized")
+			}
+		}
+		reputationManager = reputationMgr
+	} else {
+		fmt.Println("⏭️  Skipping reputation system initialization (subnet-only mode)")
+		reputationManager = nil
+		reputationSubmitter = nil
 	}
 
 	return &DemoCoordinator{
@@ -145,7 +209,7 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 		Validators:          validators,
 		GraphAdapter:        graphAdapter,
 		PaymentCoord:        paymentCoord,
-		ReputationMgr:       reputationMgr,
+		ReputationMgr:       reputationManager,
 		ReputationSubmitter: reputationSubmitter,
 		userInputs: []string{
 			"Analyze market trends for Q4",
@@ -168,40 +232,28 @@ func (dc *DemoCoordinator) RunVLCValidation() bool {
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	// Collect validation results from all validators
-	var validationResults []*subnet.VLCValidationResult
+	// Use only Validator-1 for testing the miner
+	fmt.Printf("═══ Validator-1 Testing Agent ═══\n")
 
-	// Each validator tests the miner
-	for i, validator := range dc.Validators {
-		fmt.Printf("═══ Validator %d Testing Agent ═══\n", i+1)
+	validator := dc.Validators[0]  // Use only first validator
+	requestID := "vlc-validation-test-1"
+	test := validator.ValidateAgentVLC(dc.Miner, requestID)
 
-		requestID := fmt.Sprintf("vlc-validation-test-%d", i+1)
-		test := validator.ValidateAgentVLC(dc.Miner, requestID)
+	result := validator.CreateVLCValidationResult(test)
+	score := result.Score
 
-		result := validator.CreateVLCValidationResult(test)
-		validationResults = append(validationResults, result)
-
-		fmt.Println()
-	}
-
-	// Calculate aggregate score
-	avgScore, passed := subnet.GetVLCValidationSummary(validationResults)
-
+	fmt.Println()
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║              VLC VALIDATION SUMMARY                         ║")
+	fmt.Println("║              VLC VALIDATION RESULT                          ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	for i, result := range validationResults {
-		status := "✅"
-		if !result.Passed {
-			status = "❌"
-		}
-		fmt.Printf("  %s Validator-%d: %d/100\n", status, i+1, result.Score)
+	status := "✅"
+	passed := score >= 70  // Pass if score is 70 or above
+	if !passed {
+		status = "❌"
 	}
-
-	fmt.Println()
-	fmt.Printf("  Average Score: %d/100\n", avgScore)
+	fmt.Printf("  %s Validator-1: %d/100\n", status, score)
 	fmt.Printf("  Pass Threshold: 70/100\n")
 	fmt.Println()
 
@@ -210,7 +262,7 @@ func (dc *DemoCoordinator) RunVLCValidation() bool {
 		fmt.Println("║        ✅ AGENT PASSED VLC PROTOCOL VALIDATION              ║")
 		fmt.Println("║                                                              ║")
 		fmt.Printf("║  Agent: %-52s ║\n", dc.Miner.ID)
-		fmt.Printf("║  Score: %d/100                                               ║\n", avgScore)
+		fmt.Printf("║  Score: %d/100                                               ║\n", score)
 		fmt.Println("║  Status: AUTHORIZED FOR SUBNET OPERATIONS                   ║")
 		fmt.Println("║                                                              ║")
 		fmt.Println("║  The agent has demonstrated correct VLC implementation:     ║")
@@ -229,7 +281,7 @@ func (dc *DemoCoordinator) RunVLCValidation() bool {
 		fmt.Println("║        ❌ AGENT FAILED VLC PROTOCOL VALIDATION              ║")
 		fmt.Println("║                                                              ║")
 		fmt.Printf("║  Agent: %-52s ║\n", dc.Miner.ID)
-		fmt.Printf("║  Score: %d/100 (Required: ≥70)                               ║\n", avgScore)
+		fmt.Printf("║  Score: %d/100 (Required: ≥70)                               ║\n", score)
 		fmt.Println("║  Status: NOT AUTHORIZED                                     ║")
 		fmt.Println("║                                                              ║")
 		fmt.Println("║  The agent must fix VLC implementation before proceeding.   ║")
@@ -261,11 +313,11 @@ func (dc *DemoCoordinator) RunDemo() {
 
 	// Print final summary
 	dc.printSummary()
-	
+
 	// Commit the causal event graph to Dgraph for visualization
 	fmt.Printf("\n=== Committing VLC Event Graph to Dgraph ===\n")
 	dc.GraphAdapter.PrintGraphSummary()
-	
+
 	if err := dc.GraphAdapter.CommitGraph(); err != nil {
 		fmt.Printf("Error committing graph to Dgraph: %v\n", err)
 		fmt.Printf("\nTroubleshooting:\n")
@@ -278,14 +330,15 @@ func (dc *DemoCoordinator) RunDemo() {
 		fmt.Printf("- Ratel UI: http://localhost:8000\n")
 		fmt.Printf("- Alternative: http://localhost:8080\n")
 		fmt.Printf("- GraphQL: http://localhost:8080/graphql\n")
-		// Note: GetEventCount() returns 0 after commit as events are cleared, 
+		// Note: GetEventCount() returns 0 after commit as events are cleared,
 		// but we already showed the count in the graph summary above
 	}
 }
 
 // processInput handles a single user input through the complete round-based workflow with VLC
 func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
-	requestID := fmt.Sprintf("req-%s-%d", dc.SubnetID, inputNumber)
+	// Use timestamp to ensure unique request IDs across runs
+	requestID := fmt.Sprintf("req-%s-%d-%d", dc.SubnetID, inputNumber, time.Now().Unix())
 
 	fmt.Printf("User Input: %s\n", input)
 
@@ -300,7 +353,12 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 	// *** x402 PAYMENT REQUEST: Agent generates payment request for client ***
 	var paymentRequest *subnet.PaymentRequest
 	if dc.PaymentCoord != nil {
-		agentAddr := common.HexToAddress("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc")
+		// Get miner/agent address from environment or fallback to Sepolia
+		agentAddrStr := os.Getenv("MINER_ADDRESS")
+		if agentAddrStr == "" {
+			agentAddrStr = "0x86cDAb16A19602F74E4fFB996baD70307105a3A3" // Sepolia miner address
+		}
+		agentAddr := common.HexToAddress(agentAddrStr)
 		paymentRequest = dc.PaymentCoord.GeneratePaymentRequest(requestID, agentAddr)
 
 		fmt.Printf("\n📋 Agent sends x402 Payment Request to Client:\n")
@@ -308,31 +366,71 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 		fmt.Printf("   Amount: %s wei (10 %s)\n", paymentRequest.Amount, paymentRequest.Asset.Symbol)
 		fmt.Printf("   Agent: %s\n", paymentRequest.Agent.Address)
 		fmt.Printf("   Payment Token (%s): %s\n", paymentRequest.Asset.Symbol, paymentRequest.Asset.Contract)
-		fmt.Printf("   Escrow Contract: %s\n", paymentRequest.Escrow.Contract)
-		fmt.Printf("   Deadline: %d seconds\n\n", paymentRequest.Escrow.Timeout)
+		// Only show escrow details if not in direct mode
+		if dc.PaymentCoord.GetPaymentMode() != "direct" {
+			fmt.Printf("   Escrow Contract: %s\n", paymentRequest.Escrow.Contract)
+			fmt.Printf("   Deadline: %d seconds\n", paymentRequest.Escrow.Timeout)
+		}
+		fmt.Println()
 	}
 
-	// *** PAYMENT DEPOSIT TO ESCROW: Client receives payment request and deposits ***
+	// *** PAYMENT PROCESSING: Client receives payment request and processes payment ***
 	if dc.PaymentCoord != nil && paymentRequest != nil {
-		fmt.Printf("💳 Client receives payment request and initiates deposit...\n")
+		fmt.Printf("💳 Client receives payment request and initiates payment...\n")
 
-		// Client is VALIDATOR2 (Anvil account #2)
-		clientAddr := common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
+		// Get client address from environment or fallback to Sepolia
+		clientAddrStr := os.Getenv("CLIENT_ADDRESS")
+		if clientAddrStr == "" {
+			clientAddrStr = "0xfA6EC9Cf1E293A91a8ea2EdCc4A2324d48129821" // Sepolia client with USDC
+		}
+		clientAddr := common.HexToAddress(clientAddrStr)
 		agentAddr := common.HexToAddress(paymentRequest.Agent.Address)
 		paymentAmount := new(big.Int)
 		paymentAmount.SetString(paymentRequest.Amount, 10)
 
-		// Client deposits to escrow using client's private key
-		clientPrivateKey := "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-		err := dc.PaymentCoord.DepositPaymentWithClientSignature(
-			requestID,
-			clientAddr,
-			agentAddr,
-			paymentAmount,
-			clientPrivateKey,
-		)
-		if err != nil {
-			fmt.Printf("⚠️  Failed to deposit payment to escrow: %v\n", err)
+		// Check if we should use facilitator service
+		if dc.PaymentCoord.UseFacilitator() {
+			fmt.Printf("📡 Using x402 Facilitator for payment processing...\n")
+
+			// Get payment scheme from facilitator
+			scheme, err := dc.PaymentCoord.GetPaymentScheme()
+			if err != nil {
+				fmt.Printf("⚠️  Failed to get payment scheme: %v\n", err)
+				scheme = "escrow" // Default to escrow
+			}
+
+			fmt.Printf("   Payment scheme: %s\n", scheme)
+
+			// Settle payment through facilitator
+			err = dc.PaymentCoord.SettlePaymentWithFacilitator(
+				requestID,
+				clientAddr,
+				agentAddr,
+				paymentRequest.Amount,
+				scheme,
+			)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to settle payment via facilitator: %v\n", err)
+			}
+		} else {
+			// Fallback to direct escrow deposit (old method)
+			fmt.Printf("📝 Using direct escrow deposit (no facilitator)...\n")
+
+			// Get client private key from environment or fallback to Sepolia
+			clientPrivateKey := os.Getenv("CLIENT_KEY")
+			if clientPrivateKey == "" {
+				clientPrivateKey = "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97" // Sepolia client key
+			}
+			err := dc.PaymentCoord.DepositPaymentWithClientSignature(
+				requestID,
+				clientAddr,
+				agentAddr,
+				paymentAmount,
+				clientPrivateKey,
+			)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to deposit payment to escrow: %v\n", err)
+			}
 		}
 	}
 
@@ -373,10 +471,10 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 
 	// Step 2: UI Validator orchestrates info request
 	uiValidator := dc.Validators[0]
-	
+
 	// Update UI validator's VLC with miner's latest state
 	uiValidator.UpdateMinerClock(minerResponse.VLCClock)
-	
+
 	infoRequest := uiValidator.RequestMoreInfo(minerResponse.RequestID, minerResponse.InfoRequest)
 
 	if infoRequest != nil {
@@ -425,7 +523,7 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 // validateVLCSequenceFromMiner validates miner's VLC sequence across all validators
 func (dc *DemoCoordinator) validateVLCSequenceFromMiner(minerResponse *subnet.MinerResponseMessage) {
 	fmt.Printf("Validators validating Miner VLC sequence (local verification)...\n")
-	
+
 	// Each validator independently validates miner's VLC sequence
 	// Only Validator-1 maintains VLC state, others just validate the sequence
 	allValid := true
@@ -446,7 +544,7 @@ func (dc *DemoCoordinator) validateVLCSequenceFromMiner(minerResponse *subnet.Mi
 			}
 		}
 	}
-	
+
 	if allValid {
 		fmt.Printf("Miner VLC validation: PASSED\n")
 	} else {
@@ -457,7 +555,7 @@ func (dc *DemoCoordinator) validateVLCSequenceFromMiner(minerResponse *subnet.Mi
 // validateVLCSequenceFromValidator validates validator-1's VLC operations
 func (dc *DemoCoordinator) validateVLCSequenceFromValidator(validatorClock *vlc.Clock) {
 	fmt.Printf("Miner validating Validator-1 VLC sequence...\n")
-	
+
 	// Miner validates validator's VLC operations
 	// This maintains bidirectional VLC consistency
 	dc.Miner.UpdateValidatorClock(validatorClock)
@@ -542,22 +640,10 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 	// *** ROUND END: NO VLC increment (no message to/from miner, just user delivery) ***
 	// User is external to subnet, so no VLC increment
 	fmt.Printf("Round %d: Completed by Validator-1 aggregating final result\n", inputNumber)
-	
-	// Track comprehensive round completion with all actions in one VLC mutation
-	dc.GraphAdapter.TrackRoundComplete(
-		minerResponse.RequestID, 
-		inputNumber, 
-		uiValidator.GetLastMinerClock(), 
-		consensusResult, 
-		userFeedback, 
-		userAccepts, 
-		finalResult, 
-		parentEventID,
-	)
-
 	fmt.Printf("Final result: %s\n", finalResult)
 
-	// *** REPUTATION: Generate FeedbackAuth for client after task completion ***
+	// *** REPUTATION: Generate FeedbackAuth BEFORE epoch submission ***
+	// This ensures feedback is included in the epoch data
 	if dc.ReputationMgr != nil {
 		taskSuccess := sharedAssessment.IsAccepted() && userAccepts
 		_, err := dc.ReputationMgr.GenerateFeedbackAuth(
@@ -568,25 +654,38 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 		if err != nil {
 			fmt.Printf("⚠️  Failed to generate FeedbackAuth: %v\n", err)
 		}
+	}
 
-		// Check if epoch is complete (every 3 tasks)
-		if dc.ReputationMgr.IsEpochComplete() {
-			fmt.Printf("\n📊 Epoch %d Complete! Ready for batch feedback submission\n", dc.ReputationMgr.CurrentEpoch)
-			dc.ReputationMgr.PrintEpochSummary(dc.ReputationMgr.CurrentEpoch)
+	// Track comprehensive round completion with all actions in one VLC mutation
+	// NOTE: This may trigger epoch submission if this is the 3rd round
+	dc.GraphAdapter.TrackRoundComplete(
+		minerResponse.RequestID,
+		inputNumber,
+		uiValidator.GetLastMinerClock(),
+		consensusResult,
+		userFeedback,
+		userAccepts,
+		finalResult,
+		parentEventID,
+	)
 
-			// Automatically submit batch feedback to blockchain
-			if dc.ReputationSubmitter != nil {
-				tasks := dc.ReputationMgr.GetCurrentEpochFeedbacks()
-				err := dc.ReputationSubmitter.SubmitEpochFeedback(dc.ReputationMgr.AgentID, tasks)
-				if err != nil {
-					fmt.Printf("⚠️  Failed to submit epoch feedback: %v\n", err)
-				}
+	// Check if epoch is complete (every 3 tasks) - AFTER TrackRoundComplete
+	if dc.ReputationMgr != nil && dc.ReputationMgr.IsEpochComplete() {
+		fmt.Printf("\n📊 Epoch %d Complete! Ready for batch feedback submission\n", dc.ReputationMgr.CurrentEpoch)
+		dc.ReputationMgr.PrintEpochSummary(dc.ReputationMgr.CurrentEpoch)
+
+		// Automatically submit batch feedback to blockchain
+		if dc.ReputationSubmitter != nil {
+			tasks := dc.ReputationMgr.GetCurrentEpochFeedbacks()
+			err := dc.ReputationSubmitter.SubmitEpochFeedback(dc.ReputationMgr.AgentID, tasks)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to submit epoch feedback: %v\n", err)
 			}
+		}
 
-			// Start next epoch
-			if inputNumber < 7 { // More tasks remaining
-				dc.ReputationMgr.StartNextEpoch()
-			}
+		// Start next epoch
+		if inputNumber < 7 { // More tasks remaining
+			dc.ReputationMgr.StartNextEpoch()
 		}
 	}
 

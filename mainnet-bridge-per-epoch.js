@@ -29,23 +29,23 @@ class PerEpochMainnetBridge {
         this.epochSubmissions = new Map(); // Track submitted epochs
         this.httpServer = null;
 
-        // Network configuration
-        this.RPC_URL = "http://localhost:8545";
+        // Network configuration - use environment variable or default to localhost
+        this.RPC_URL = process.env.RPC_URL || "http://localhost:8545";
         this.DGRAPH_URL = "http://localhost:8080";
 
-        // Account configuration
+        // Account configuration - use environment variables or defaults for local Anvil
         this.accounts = {
             deployer: {
-                address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-                privateKey: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                address: process.env.DEPLOYER_ADDRESS || "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                privateKey: process.env.DEPLOYER_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
             },
             validator1: {
-                address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-                privateKey: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+                address: process.env.VALIDATOR_1_ADDRESS || "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                privateKey: process.env.VALIDATOR_1_KEY || "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
             },
             miner: {
-                address: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
-                privateKey: "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
+                address: process.env.MINER_ADDRESS || "0x86cDAb16A19602F74E4fFB996baD70307105a3A3", // Sepolia miner
+                privateKey: process.env.MINER_KEY || "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
             }
         };
     }

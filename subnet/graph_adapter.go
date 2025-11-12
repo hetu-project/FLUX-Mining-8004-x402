@@ -154,9 +154,10 @@ func (sga *SubnetGraphAdapter) sendEpochToBridge(epochData *EpochData) error {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Send request with timeout
+	// Send request with longer timeout (60 seconds) for bridge communication
+	// The bridge might be processing blockchain transactions which can be slow
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 
 	resp, err := client.Do(req)

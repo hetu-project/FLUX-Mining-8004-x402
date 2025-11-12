@@ -76,8 +76,13 @@ func main() {
 		fmt.Println("Dgraph initialized successfully!")
 	}
 
-	// Create demo coordinator with per-epoch callback integration  
-	coordinator := demo.NewDemoCoordinator("per-epoch-subnet-001")
+	// Create demo coordinator with per-epoch callback integration
+	// Use the subnet ID from environment or default
+	subnetID := os.Getenv("SUBNET_ID")
+	if subnetID == "" {
+		subnetID = "subnet-1" // Default to the registered subnet
+	}
+	coordinator := demo.NewDemoCoordinator(subnetID)
 	
 	// Set up HTTP bridge URL only if not in subnet-only mode
 	if !subnetOnlyMode && coordinator.GraphAdapter != nil {

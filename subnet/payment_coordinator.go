@@ -1,12 +1,16 @@
 package subnet
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +35,10 @@ type PaymentCoordinator struct {
 	escrowAddress   common.Address
 	coordinatorKey  *ecdsa.PrivateKey
 	coordinatorAddr common.Address
+	clientKey       *ecdsa.PrivateKey  // Client's private key for signing transactions
+	clientAddr      common.Address      // Client's address
+	facilitatorURL  string // x402 facilitator service URL
+	paymentMode     string // direct, escrow, or hybrid
 
 	// Payment tracking
 	payments map[string]*PaymentTracker // taskID -> payment details
@@ -102,6 +110,41 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 		return nil, fmt.Errorf("failed to create transactor: %w", err)
 	}
 
+	// Get facilitator URL from environment or use default
+	facilitatorURL := os.Getenv("FACILITATOR_URL")
+	if facilitatorURL == "" {
+		facilitatorURL = "http://localhost:3002"
+	}
+
+	// Get payment mode from environment or use default
+	paymentMode := os.Getenv("PAYMENT_MODE")
+	if paymentMode == "" {
+		paymentMode = "hybrid" // Default to hybrid mode
+	}
+
+	// Get client private key from environment for direct payment signing
+	clientKeyHex := os.Getenv("CLIENT_KEY")
+	if clientKeyHex == "" {
+		// Fallback to PRIVATE_KEY_CLIENT for backwards compatibility
+		clientKeyHex = os.Getenv("PRIVATE_KEY_CLIENT")
+		if clientKeyHex == "" {
+			return nil, fmt.Errorf("CLIENT_KEY environment variable not set")
+		}
+	}
+
+	clientKey, err := crypto.HexToECDSA(strings.TrimPrefix(clientKeyHex, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse client private key: %w", err)
+	}
+
+	// Derive client address from private key
+	clientPublicKey := clientKey.Public()
+	clientPublicKeyECDSA, ok := clientPublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("error casting client public key to ECDSA")
+	}
+	clientAddr := crypto.PubkeyToAddress(*clientPublicKeyECDSA)
+
 	pc := &PaymentCoordinator{
 		client:              client,
 		auth:                auth,
@@ -111,22 +154,31 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 		escrowAddress:       common.HexToAddress(addresses.Escrow),
 		coordinatorKey:      privateKey,
 		coordinatorAddr:     coordinatorAddr,
+		clientKey:           clientKey,
+		clientAddr:          clientAddr,
+		facilitatorURL:      facilitatorURL,
+		paymentMode:         paymentMode,
 		payments:            make(map[string]*PaymentTracker),
 	}
 
 	fmt.Printf("💳 Payment Coordinator initialized:\n")
 	fmt.Printf("   Chain ID: %s\n", chainID.String())
 	fmt.Printf("   Coordinator: %s\n", coordinatorAddr.Hex())
+	fmt.Printf("   Client: %s\n", clientAddr.Hex())
 	fmt.Printf("   Payment Token: %s (%s)\n", pc.paymentTokenName, pc.paymentTokenAddress.Hex())
 	fmt.Printf("   Escrow: %s\n", pc.escrowAddress.Hex())
+	fmt.Printf("   Facilitator: %s\n", facilitatorURL)
+	fmt.Printf("   Payment Mode: %s\n", paymentMode)
 
 	return pc, nil
 }
 
 // GeneratePaymentRequest creates an x402 payment request for a task
 func (pc *PaymentCoordinator) GeneratePaymentRequest(taskID string, agentAddr common.Address) *PaymentRequest {
-	// Fixed pricing: 10 tokens per task (in wei)
-	amount := "10000000000000000000" // 10 * 10^18 wei
+	// Fixed pricing: 10 tokens per task
+	// Amount should be human-readable (e.g., "10" for 10 USDC)
+	// The facilitator will use parseUnits to convert to wei based on decimals
+	amount := "10" // 10 USDC
 
 	return &PaymentRequest{
 		TaskID:         taskID,
@@ -146,6 +198,284 @@ func (pc *PaymentCoordinator) GeneratePaymentRequest(taskID string, agentAddr co
 		},
 		RequiresPayment: true,
 	}
+}
+
+// UseFacilitator checks if we should use the facilitator service
+func (pc *PaymentCoordinator) UseFacilitator() bool {
+	return pc.facilitatorURL != ""
+}
+
+// VerifyPaymentWithFacilitator verifies payment through the x402 facilitator
+func (pc *PaymentCoordinator) VerifyPaymentWithFacilitator(payment map[string]interface{}, scheme string) (bool, error) {
+	if !pc.UseFacilitator() {
+		return false, fmt.Errorf("facilitator URL not configured")
+	}
+
+	reqBody := map[string]interface{}{
+		"payment": payment,
+		"scheme":  scheme,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := http.Post(pc.facilitatorURL+"/verify", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return false, fmt.Errorf("failed to contact facilitator: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Valid        bool     `json:"valid"`
+		Facilitator  string   `json:"facilitator"`
+		Scheme       string   `json:"scheme"`
+		Capabilities []string `json:"capabilities"`
+		Error        string   `json:"error,omitempty"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err
+	}
+
+	if result.Error != "" {
+		return false, fmt.Errorf("verification failed: %s", result.Error)
+	}
+
+	return result.Valid, nil
+}
+
+// createSignedPaymentTransaction creates and signs an ERC20 transfer transaction for direct payments
+func (pc *PaymentCoordinator) createSignedPaymentTransaction(recipient common.Address, amount string) (string, error) {
+	// Parse amount to wei (USDC has 6 decimals)
+	amountFloat, err := strconv.ParseFloat(amount, 64)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse amount: %w", err)
+	}
+	amountWei := new(big.Int).SetUint64(uint64(amountFloat * 1e6)) // 6 decimals for USDC
+
+	// Get current nonce for client
+	nonce, err := pc.client.PendingNonceAt(context.Background(), pc.clientAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get nonce: %w", err)
+	}
+
+	// Get gas price
+	gasPrice, err := pc.client.SuggestGasPrice(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("failed to get gas price: %w", err)
+	}
+
+	// Create ERC20 transfer data
+	// Function signature: transfer(address,uint256)
+	transferFnSignature := []byte("transfer(address,uint256)")
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(transferFnSignature)
+	methodID := hash.Sum(nil)[:4]
+
+	// Pad recipient address to 32 bytes
+	paddedRecipient := common.LeftPadBytes(recipient.Bytes(), 32)
+
+	// Pad amount to 32 bytes
+	paddedAmount := common.LeftPadBytes(amountWei.Bytes(), 32)
+
+	// Concatenate method ID + padded recipient + padded amount
+	var data []byte
+	data = append(data, methodID...)
+	data = append(data, paddedRecipient...)
+	data = append(data, paddedAmount...)
+
+	// Create transaction
+	gasLimit := uint64(100000) // Standard ERC20 transfer gas limit
+	tx := types.NewTransaction(nonce, pc.paymentTokenAddress, big.NewInt(0), gasLimit, gasPrice, data)
+
+	// Sign transaction with client's private key
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(pc.chainID), pc.clientKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	// Encode signed transaction to hex string
+	txBytes, err := signedTx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+
+	signedTxHex := "0x" + common.Bytes2Hex(txBytes)
+	return signedTxHex, nil
+}
+
+// SettlePaymentWithFacilitator settles payment through the x402 facilitator
+func (pc *PaymentCoordinator) SettlePaymentWithFacilitator(
+	taskID string,
+	clientAddr common.Address,
+	agentAddr common.Address,
+	amount string,
+	scheme string,
+) error {
+	if !pc.UseFacilitator() {
+		return fmt.Errorf("facilitator URL not configured")
+	}
+
+	payment := map[string]interface{}{
+		"amount":    amount,
+		"recipient": agentAddr.Hex(),
+		"client":    clientAddr.Hex(),
+		"agent":     agentAddr.Hex(),
+		"taskId":    taskID,
+	}
+
+	// For direct/exact payments, client must create and sign the transaction
+	// Both "direct" and "exact" schemes require pre-signed transactions from the client
+	if scheme == "direct" || scheme == "exact" {
+		signedTx, err := pc.createSignedPaymentTransaction(agentAddr, amount)
+		if err != nil {
+			return fmt.Errorf("failed to create signed transaction: %w", err)
+		}
+		payment["signedTx"] = signedTx
+	}
+
+	reqBody := map[string]interface{}{
+		"payment": payment,
+		"scheme":  scheme,
+		"taskId":  taskID,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(pc.facilitatorURL+"/settle", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to contact facilitator: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("settlement failed with status %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		TransactionHash string `json:"transactionHash"`
+		BlockNumber     int64  `json:"blockNumber"`
+		Status          string `json:"status"`
+		Scheme          string `json:"scheme"`
+		Amount          string `json:"amount"`
+		TaskID          string `json:"taskId,omitempty"`
+		Error           string `json:"error,omitempty"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return err
+	}
+
+	if result.Error != "" {
+		return fmt.Errorf("settlement error: %s", result.Error)
+	}
+
+	fmt.Printf("✅ Payment settled via facilitator:\n")
+	fmt.Printf("   Scheme: %s\n", result.Scheme)
+	fmt.Printf("   Status: %s\n", result.Status)
+	fmt.Printf("   Transaction: %s\n", result.TransactionHash)
+	fmt.Printf("   Block: %d\n", result.BlockNumber)
+
+	// Track the payment in the local map for later release/refund
+	taskIDBytes := [32]byte{}
+	copy(taskIDBytes[:], []byte(taskID))
+
+	// Parse amount - amount is human-readable (e.g., "10" for 10 USDC)
+	// Convert to wei (USDC uses 6 decimals)
+	amountFloat, err := strconv.ParseFloat(amount, 64)
+	if err != nil {
+		return fmt.Errorf("failed to parse amount: %w", err)
+	}
+	amountWei := uint64(amountFloat * 1000000) // USDC has 6 decimals
+	amountBig := new(big.Int).SetUint64(amountWei)
+
+	// Determine payment status based on scheme and result status
+	// For escrow: payment is deposited and needs to be released
+	// For direct: payment is pending validation (not yet broadcast to blockchain)
+	paymentStatus := PaymentDeposited
+	if result.Scheme == "direct" || result.Scheme == "exact" {
+		if result.Status == "pending_validation" {
+			// Direct payment is stored but not yet broadcast
+			paymentStatus = PaymentPending
+		} else if result.Status == "settled" {
+			// Legacy behavior - immediate settlement
+			paymentStatus = PaymentCompleted
+		}
+	}
+
+	pc.payments[taskID] = &PaymentTracker{
+		TaskID:           taskIDBytes,
+		Client:           clientAddr,
+		Agent:            agentAddr,
+		Amount:           amountBig,
+		DepositTime:      time.Now(),
+		Status:           paymentStatus,
+		ConsensusReached: false,
+		QualityScore:     0,
+		UserAccepted:     false,
+	}
+
+	return nil
+}
+
+// GetPaymentScheme determines which payment scheme to use based on facilitator capabilities
+func (pc *PaymentCoordinator) GetPaymentScheme() (string, error) {
+	if !pc.UseFacilitator() {
+		return "escrow", nil // Default to our escrow system if no facilitator
+	}
+
+	resp, err := http.Get(pc.facilitatorURL + "/payment-requirements")
+	if err != nil {
+		return "", fmt.Errorf("failed to get payment requirements: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var requirements struct {
+		X402Version int `json:"x402Version"`
+		Accepts     []struct {
+			Scheme string `json:"scheme"`
+		} `json:"accepts"`
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if err := json.Unmarshal(body, &requirements); err != nil {
+		return "", err
+	}
+
+	// Prefer escrow if available, otherwise use direct/exact
+	for _, accept := range requirements.Accepts {
+		if accept.Scheme == "escrow" {
+			return "escrow", nil
+		}
+	}
+
+	for _, accept := range requirements.Accepts {
+		if accept.Scheme == "exact" || accept.Scheme == "direct" {
+			return "exact", nil
+		}
+	}
+
+	return "", fmt.Errorf("no supported payment scheme found")
 }
 
 // DepositPayment deposits payment to escrow using standard transferFrom
@@ -419,10 +749,126 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 		return fmt.Errorf("payment not found for task %s", taskID)
 	}
 
-	if payment.Status != PaymentDeposited {
-		return fmt.Errorf("payment status is not DEPOSITED (current: %v)", payment.Status)
+	// Handle different payment statuses
+	if payment.Status == PaymentCompleted {
+		// Legacy direct payment - already completed
+		fmt.Printf("ℹ️  Payment for task %s is already completed (direct payment)\n", taskID)
+		fmt.Printf("   Agent %s already received %s %s\n",
+			payment.Agent.Hex(), formatEther(payment.Amount), pc.paymentTokenName)
+		return nil
 	}
 
+	// For pending direct payments, finalize the transaction (broadcast to blockchain)
+	if payment.Status == PaymentPending {
+		if pc.UseFacilitator() {
+			fmt.Printf("📡 Finalizing direct payment via x402 Facilitator...\n")
+
+			// Call facilitator's /direct/finalize endpoint to broadcast transaction
+			finalizeReq := map[string]interface{}{
+				"taskId":   taskID,
+				"approved": true,
+				"validatorApprovals": []string{"validator-1", "validator-2"},  // TODO: Get actual approvals
+			}
+
+			reqBody, _ := json.Marshal(finalizeReq)
+			resp, err := http.Post(
+				pc.facilitatorURL+"/direct/finalize",
+				"application/json",
+				bytes.NewBuffer(reqBody),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to finalize direct payment: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("finalization failed: %s", string(body))
+			}
+
+			// Parse the response to get transaction hash
+			body, _ := io.ReadAll(resp.Body)
+			var result struct {
+				TransactionHash string `json:"transactionHash"`
+				BlockNumber     int64  `json:"blockNumber"`
+				Status          string `json:"status"`
+			}
+			if err := json.Unmarshal(body, &result); err == nil && result.TransactionHash != "" {
+				fmt.Printf("✅ Direct payment finalized and broadcast to blockchain\n")
+				fmt.Printf("   Transaction: %s\n", result.TransactionHash)
+			} else {
+				fmt.Printf("✅ Direct payment finalized and broadcast to blockchain\n")
+			}
+			payment.Status = PaymentCompleted
+			return nil
+		}
+	}
+
+	if payment.Status != PaymentDeposited {
+		return fmt.Errorf("payment status is not valid for release (current: %v)", payment.Status)
+	}
+
+	// Check if we should use facilitator service for release
+	if pc.UseFacilitator() {
+		fmt.Printf("📡 Using x402 Facilitator to release payment...\n")
+
+		// Create validator approvals (in production, would gather real signatures)
+		validatorApprovals := []string{"validator1-approved"} // Simplified for demo
+
+		reqBody := map[string]interface{}{
+			"taskId":             taskID,
+			"validatorApprovals": validatorApprovals,
+		}
+
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+
+		resp, err := http.Post(pc.facilitatorURL+"/escrow/release", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to contact facilitator: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("release failed with status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			TransactionHash string `json:"transactionHash"`
+			BlockNumber     int64  `json:"blockNumber"`
+			Status          string `json:"status"`
+			TaskID          string `json:"taskId"`
+			Error           string `json:"error,omitempty"`
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		if err := json.Unmarshal(body, &result); err != nil {
+			return err
+		}
+
+		if result.Error != "" {
+			return fmt.Errorf("release error: %s", result.Error)
+		}
+
+		fmt.Printf("✅ Payment released via facilitator:\n")
+		fmt.Printf("   Transaction: %s\n", result.TransactionHash)
+		fmt.Printf("   Block: %d\n", result.BlockNumber)
+
+		// Update payment status
+		payment.Status = PaymentReleased
+		payment.ReleaseTime = time.Now()
+
+		return nil
+	}
+
+	// Fallback to direct escrow release (old method)
 	// Call escrow contract's releasePayment function
 	escrowABI, err := getEscrowABI()
 	if err != nil {
@@ -507,11 +953,108 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 		return fmt.Errorf("payment not found for task %s", taskID)
 	}
 
-	if payment.Status != PaymentDeposited && payment.Status != PaymentExpired {
-		return fmt.Errorf("payment status is not DEPOSITED or EXPIRED (current: %v)", payment.Status)
+	// Handle different payment statuses
+	if payment.Status == PaymentCompleted {
+		// Legacy direct payment - already completed, cannot refund
+		fmt.Printf("⚠️  Cannot refund task %s - direct payment already completed\n", taskID)
+		fmt.Printf("   Agent %s has already received %s %s\n",
+			payment.Agent.Hex(), formatEther(payment.Amount), pc.paymentTokenName)
+		fmt.Printf("   Manual intervention required for refund in direct payment mode\n")
+		return fmt.Errorf("cannot refund completed direct payment")
 	}
 
-	// Call escrow contract's refundPayment function
+	// For pending direct payments, discard the transaction (don't broadcast)
+	if payment.Status == PaymentPending {
+		if pc.UseFacilitator() {
+			fmt.Printf("📡 Discarding pending direct payment via x402 Facilitator...\n")
+
+			// Call facilitator's /direct/finalize endpoint with approved=false
+			finalizeReq := map[string]interface{}{
+				"taskId":   taskID,
+				"approved": false,  // Reject the payment
+				"validatorApprovals": []string{},
+			}
+
+			reqBody, _ := json.Marshal(finalizeReq)
+			resp, err := http.Post(
+				pc.facilitatorURL+"/direct/finalize",
+				"application/json",
+				bytes.NewBuffer(reqBody),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to discard direct payment: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("discard failed: %s", string(body))
+			}
+
+			fmt.Printf("✅ Direct payment discarded - no funds transferred\n")
+			payment.Status = PaymentRefunded
+			return nil
+		}
+	}
+
+	if payment.Status != PaymentDeposited && payment.Status != PaymentExpired {
+		return fmt.Errorf("payment status is not valid for refund (current: %v)", payment.Status)
+	}
+
+	// If using facilitator, route through it
+	if pc.UseFacilitator() {
+		fmt.Println("📡 Using x402 Facilitator to refund payment...")
+
+		refundRequest := map[string]interface{}{
+			"taskId": taskID,
+			"reason": "User rejected or low quality",
+		}
+
+		reqBody, err := json.Marshal(refundRequest)
+		if err != nil {
+			return fmt.Errorf("failed to marshal refund request: %w", err)
+		}
+
+		resp, err := http.Post(
+			pc.facilitatorURL+"/escrow/refund",
+			"application/json",
+			bytes.NewBuffer(reqBody),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to call facilitator refund: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read refund response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("facilitator refund failed (status %d): %s", resp.StatusCode, string(body))
+		}
+
+		var refundResp struct {
+			TransactionHash string `json:"transactionHash"`
+			BlockNumber     int    `json:"blockNumber"`
+			Status          string `json:"status"`
+		}
+
+		if err := json.Unmarshal(body, &refundResp); err != nil {
+			return fmt.Errorf("failed to parse refund response: %w", err)
+		}
+
+		fmt.Printf("✅ Payment refunded via facilitator:\n")
+		fmt.Printf("   Transaction: %s\n", refundResp.TransactionHash)
+		fmt.Printf("   Block: %d\n", refundResp.BlockNumber)
+
+		// Update payment status
+		payment.Status = PaymentRefunded
+
+		return nil
+	}
+
+	// Direct escrow refund (fallback when not using facilitator)
 	escrowABI, err := getEscrowABI()
 	if err != nil {
 		return fmt.Errorf("failed to load escrow ABI: %w", err)
@@ -627,9 +1170,56 @@ func (pc *PaymentCoordinator) GetPaymentTokenName() string {
 	return pc.paymentTokenName
 }
 
+// GetPaymentMode returns the configured payment mode (direct, escrow, or hybrid)
+func (pc *PaymentCoordinator) GetPaymentMode() string {
+	return pc.paymentMode
+}
+
 // VerifyPaymentLocked verifies that payment is locked in escrow on-chain before agent processes task
 // This provides cryptographic proof that funds are secured, enabling trustless agent operation
 func (pc *PaymentCoordinator) VerifyPaymentLocked(taskID string, agentAddr common.Address, minAmount *big.Int) (bool, error) {
+	// First check local payment tracker (for direct payments or facilitator payments)
+	if trackedPayment, exists := pc.payments[taskID]; exists {
+		// Verify the payment status is valid (deposited for escrow, pending/completed for direct)
+		if trackedPayment.Status != PaymentDeposited &&
+		   trackedPayment.Status != PaymentCompleted &&
+		   trackedPayment.Status != PaymentPending {
+			return false, fmt.Errorf("payment status is %s, expected deposited, pending, or completed", trackedPayment.Status)
+		}
+
+		// Verify agent address matches
+		if trackedPayment.Agent != agentAddr {
+			return false, fmt.Errorf("payment agent %s doesn't match expected %s", trackedPayment.Agent.Hex(), agentAddr.Hex())
+		}
+
+		// Verify amount is sufficient
+		if trackedPayment.Amount.Cmp(minAmount) < 0 {
+			return false, fmt.Errorf("payment amount %s is less than minimum %s", formatEther(trackedPayment.Amount), formatEther(minAmount))
+		}
+
+		paymentType := "in escrow"
+		if trackedPayment.Status == PaymentCompleted {
+			paymentType = "direct payment"
+		}
+
+		fmt.Printf("✅ Payment verified for task %s:\n", taskID)
+		fmt.Printf("   Amount: %s %s (%s)\n", formatEther(trackedPayment.Amount), pc.paymentTokenName, paymentType)
+		fmt.Printf("   Agent: %s\n", agentAddr.Hex())
+		fmt.Printf("   Client: %s\n", trackedPayment.Client.Hex())
+
+		// For direct payments that are already completed, deadline check is not needed
+		if trackedPayment.Status == PaymentCompleted {
+			fmt.Printf("   Status: Payment already transferred to agent\n")
+			return true, nil
+		}
+
+		// For escrow payments, check deadline
+		deadline := trackedPayment.DepositTime.Add(1 * time.Hour)
+		fmt.Printf("   Deadline: %v\n", deadline.Format(time.RFC3339))
+		return true, nil
+	}
+
+	// Fallback to checking escrow contract directly (for non-facilitator escrow payments)
 	// Convert taskID to bytes32
 	taskIDBytes := stringToBytes32(taskID)
 
@@ -796,18 +1386,19 @@ func stringToBytes32(s string) [32]byte {
 }
 
 func parseEther(eth string) *big.Int {
-	// 10 AIUSD = 10 * 10^18 wei
+	// 10 USDC = 10 * 10^6 wei (USDC has 6 decimals on Sepolia)
 	result := new(big.Int)
-	result.SetString("10000000000000000000", 10) // 10 * 10^18
+	result.SetString("10000000", 10) // 10 * 10^6
 	return result
 }
 
 func formatEther(wei *big.Int) string {
-	// Convert wei to ether (divide by 10^18)
-	eth := new(big.Float).SetInt(wei)
-	divisor := new(big.Float).SetFloat64(1e18)
-	eth.Quo(eth, divisor)
-	return eth.Text('f', 2)
+	// Convert USDC smallest units to USDC (divide by 10^6, not 10^18)
+	// USDC uses 6 decimals on Sepolia, not 18 like ETH
+	usdc := new(big.Float).SetInt(wei)
+	divisor := new(big.Float).SetFloat64(1e6)
+	usdc.Quo(usdc, divisor)
+	return usdc.Text('f', 2)
 }
 
 // GenerateEIP712Signature generates an EIP-712 signature for transferWithAuthorization

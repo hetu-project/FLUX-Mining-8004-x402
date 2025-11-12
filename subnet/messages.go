@@ -199,7 +199,8 @@ type PaymentStatus string
 const (
 	PaymentPending   PaymentStatus = "pending"    // Awaiting payment authorization
 	PaymentDeposited PaymentStatus = "deposited"  // Funds locked in escrow
-	PaymentReleased  PaymentStatus = "released"   // Funds transferred to agent
+	PaymentCompleted PaymentStatus = "completed"  // Direct payment - funds already transferred to agent
+	PaymentReleased  PaymentStatus = "released"   // Funds transferred to agent (from escrow)
 	PaymentRefunded  PaymentStatus = "refunded"   // Funds returned to client
 	PaymentExpired   PaymentStatus = "expired"    // Payment timeout reached
 )

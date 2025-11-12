@@ -318,20 +318,30 @@ func (v *CoreValidator) FinalizePayment(requestID string, consensusReached bool,
 
 	// Determine if payment should be released
 	if v.paymentCoordinator.ShouldReleasePayment(requestID) {
-		// Both consensus (quality > 0.5) AND user acceptance → Release payment from escrow
-		fmt.Printf("💰 Validator %s: Releasing payment from escrow for request %s (Quality: %.2f, User: accepted)\n",
-			v.ID, requestID, qualityScore)
-		// Call escrow contract to release payment to agent
+		// Both consensus (quality > 0.5) AND user acceptance → Release/finalize payment
+		paymentMode := v.paymentCoordinator.GetPaymentMode()
+		if paymentMode == "direct" {
+			fmt.Printf("💰 Validator %s: Finalizing direct payment for request %s (Quality: %.2f, User: accepted)\n",
+				v.ID, requestID, qualityScore)
+		} else {
+			fmt.Printf("💰 Validator %s: Releasing payment from escrow for request %s (Quality: %.2f, User: accepted)\n",
+				v.ID, requestID, qualityScore)
+		}
 		return v.paymentCoordinator.ReleasePayment(requestID)
 	} else {
-		// Either consensus failed OR user rejected → Refund payment from escrow
+		// Either consensus failed OR user rejected → Refund/discard payment
 		reason := "low quality"
 		if !userAccepted {
 			reason = "user rejected"
 		}
-		fmt.Printf("↩️  Validator %s: Refunding payment from escrow for request %s (%s)\n",
-			v.ID, requestID, reason)
-		// Call escrow contract to refund payment to client
+		paymentMode := v.paymentCoordinator.GetPaymentMode()
+		if paymentMode == "direct" {
+			fmt.Printf("↩️  Validator %s: Discarding direct payment for request %s (%s)\n",
+				v.ID, requestID, reason)
+		} else {
+			fmt.Printf("↩️  Validator %s: Refunding payment from escrow for request %s (%s)\n",
+				v.ID, requestID, reason)
+		}
 		return v.paymentCoordinator.RefundPayment(requestID)
 	}
 }

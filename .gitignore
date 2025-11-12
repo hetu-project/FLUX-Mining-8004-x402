@@ -43,7 +43,6 @@ contract_addresses.json
 
 # Environment files
 .env
-.env.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -125,4 +124,21 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # Dgraph generated files
-dgraph-data
+dgraph-data/
+
+# Sepolia agent ID cache
+.sepolia_agent_id_*
+
+# Old documentation
+README_detailed.md
+
+# Foundry deployment artifacts
+broadcast/
+
+# Test and development scripts
+generate-keys.js
+generate-sepolia-keys.js
+
+# Unused contracts and scripts
+ContractRegistry.sol
+scripts/deploy-x402.s.sol

@@ -521,7 +521,9 @@
                             const paymentTokenInterface = new ethers.Interface(contractABIs[paymentTokenAddr]);
                             const paymentTokenContract = new ethers.Contract(paymentTokenAddr, paymentTokenInterface, provider);
                             const paymentBalance = await paymentTokenContract.balanceOf(address);
-                            output += `<div style="margin-left: 20px;"><span class="highlight">${paymentTokenName}:</span> ${ethers.formatEther(paymentBalance)} ${paymentTokenName}</div>`;
+                            // USDC has 6 decimals, not 18
+                            const formattedBalance = ethers.formatUnits(paymentBalance, 6);
+                            output += `<div style="margin-left: 20px;"><span class="highlight">${paymentTokenName}:</span> ${formattedBalance} ${paymentTokenName}</div>`;
                         } catch (paymentError) {
                             console.log("⚠️ Could not get payment token balance:", paymentError.message);
                         }

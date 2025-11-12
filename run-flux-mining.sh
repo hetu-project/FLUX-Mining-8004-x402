@@ -14,6 +14,8 @@ echo ""
 
 # Parse command line arguments
 PAYMENT_TOKEN="USDC"  # Default to USDC
+NETWORK="local"       # Default to local Anvil
+PAYMENT_MODE="escrow" # Default to escrow mode
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -21,9 +23,17 @@ while [[ $# -gt 0 ]]; do
             PAYMENT_TOKEN="$2"
             shift 2
             ;;
+        --network)
+            NETWORK="$2"
+            shift 2
+            ;;
+        --payment-mode)
+            PAYMENT_MODE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--payment-token USDC|AIUSD]"
+            echo "Usage: $0 [--payment-token USDC|AIUSD] [--network local|sepolia] [--payment-mode direct|escrow|hybrid]"
             exit 1
             ;;
     esac
@@ -36,8 +46,124 @@ if [[ "$PAYMENT_TOKEN" != "USDC" && "$PAYMENT_TOKEN" != "AIUSD" ]]; then
     exit 1
 fi
 
+# Validate network
+if [[ "$NETWORK" != "local" && "$NETWORK" != "sepolia" ]]; then
+    echo "❌ Invalid network: $NETWORK"
+    echo "   Must be either 'local' or 'sepolia'"
+    exit 1
+fi
+
+# Validate payment mode
+if [[ "$PAYMENT_MODE" != "direct" && "$PAYMENT_MODE" != "escrow" && "$PAYMENT_MODE" != "hybrid" ]]; then
+    echo "❌ Invalid payment mode: $PAYMENT_MODE"
+    echo "   Must be either 'direct', 'escrow', or 'hybrid'"
+    exit 1
+fi
+
+echo "🌐 Network: $NETWORK"
 echo "💵 Payment Token: $PAYMENT_TOKEN"
+echo "💳 Payment Mode: $PAYMENT_MODE"
+if [ "$PAYMENT_MODE" == "direct" ]; then
+    echo "   → Standard x402 direct payments (no escrow)"
+elif [ "$PAYMENT_MODE" == "escrow" ]; then
+    echo "   → Enhanced escrow-based payments"
+elif [ "$PAYMENT_MODE" == "hybrid" ]; then
+    echo "   → Both direct and escrow payments available"
+fi
 echo ""
+
+# Load network-specific configuration
+if [ "$NETWORK" == "sepolia" ]; then
+    if [ ! -f .env.sepolia ]; then
+        echo "❌ .env.sepolia not found! Please run deployment first."
+        exit 1
+    fi
+    echo "📋 Loading Sepolia configuration from .env.sepolia..."
+    source .env.sepolia
+
+    # Export for child processes
+    export NETWORK="sepolia"
+    export RPC_URL="$RPC_URL"
+    export CHAIN_ID="$CHAIN_ID"
+
+    # Use Sepolia contract addresses
+    PAYMENT_TOKEN_ADDRESS="$USDC_ADDRESS"  # Use USDC on Sepolia
+    IDENTITY_ADDRESS="$IDENTITY_REGISTRY_ADDRESS"
+    REPUTATION_ADDRESS="$REPUTATION_REGISTRY_ADDRESS"
+    VALIDATION_ADDRESS="$VALIDATION_REGISTRY_ADDRESS"
+
+    # Use Sepolia actor keys and addresses
+    PRIVATE_KEY="$PRIVATE_KEY_DEPLOYER"
+    MINER_KEY="$PRIVATE_KEY_MINER"
+    VALIDATOR1_KEY="$PRIVATE_KEY_VALIDATOR_1"
+    VALIDATOR2_KEY="$PRIVATE_KEY_VALIDATOR_2"
+    VALIDATOR3_KEY="$PRIVATE_KEY_VALIDATOR_3"
+    VALIDATOR4_KEY="$PRIVATE_KEY_VALIDATOR_4"
+
+    DEPLOYER="$DEPLOYER_ADDRESS"
+    MINER="$MINER_ADDRESS"
+    VALIDATOR1="$VALIDATOR_1_ADDRESS"
+    VALIDATOR2="$VALIDATOR_2_ADDRESS"
+    VALIDATOR3="$VALIDATOR_3_ADDRESS"
+    VALIDATOR4="$VALIDATOR_4_ADDRESS"
+    CLIENT="$CLIENT_ADDRESS"
+
+    # Export account info for JavaScript bridge and Go code
+    export DEPLOYER_KEY="$PRIVATE_KEY_DEPLOYER"
+    export MINER_KEY="$PRIVATE_KEY_MINER"
+    export CLIENT_KEY="$PRIVATE_KEY_CLIENT"
+    export VALIDATOR_1_KEY="$PRIVATE_KEY_VALIDATOR_1"
+    export DEPLOYER_ADDRESS="$DEPLOYER_ADDRESS"
+    export MINER_ADDRESS="$MINER_ADDRESS"
+    export CLIENT_ADDRESS="$CLIENT_ADDRESS"
+    export VALIDATOR_1_ADDRESS="$VALIDATOR_1_ADDRESS"
+    export SUBNET_ID="subnet-1"
+
+    # Load Sepolia facilitator keys if available
+    if [ -f .sepolia_facilitator_address ] && [ -f .sepolia_facilitator_key ]; then
+        FACILITATOR=$(cat .sepolia_facilitator_address)
+        FACILITATOR_KEY=$(cat .sepolia_facilitator_key)
+        echo "   Loaded Sepolia facilitator: $FACILITATOR"
+    elif [ -n "$FACILITATOR_ADDRESS" ] && [ -n "$FACILITATOR_KEY" ]; then
+        # Use from environment if set
+        FACILITATOR="$FACILITATOR_ADDRESS"
+        # FACILITATOR_KEY is already set from env
+        echo "   Using facilitator from environment: $FACILITATOR"
+    else
+        echo "   ⚠️  No Sepolia facilitator keys found. Run ./generate-facilitator-keys.js first"
+        exit 1
+    fi
+
+    echo "✅ Sepolia configuration loaded"
+    echo "   RPC: $RPC_URL"
+    echo "   Chain ID: $CHAIN_ID"
+    echo "   Using existing deployed contracts"
+    echo ""
+else
+    # Local Anvil configuration (default)
+    export NETWORK="local"
+    export RPC_URL="http://localhost:8545"
+    export CHAIN_ID="31337"
+
+    # Load local environment file
+    if [ -f .env.local ]; then
+        echo "📋 Loading local configuration from .env.local..."
+        source .env.local
+    fi
+
+    echo "✅ Using local Anvil configuration"
+    echo ""
+fi
+
+# Determine correct forge/cast paths early (needed for both networks)
+if [ -n "$SUDO_USER" ]; then
+    USER_HOME=$(eval echo ~$SUDO_USER)
+    FORGE_PATH="$USER_HOME/.foundry/bin/forge"
+    CAST_PATH="$USER_HOME/.foundry/bin/cast"
+else
+    FORGE_PATH="$HOME/.foundry/bin/forge"
+    CAST_PATH="$HOME/.foundry/bin/cast"
+fi
 
 # Preserve user's PATH when running with sudo
 if [ -n "$SUDO_USER" ]; then
@@ -51,9 +177,11 @@ fi
 
 # Check prerequisites
 echo "🔍 Checking prerequisites..."
-if ! command -v anvil &> /dev/null; then
-    echo "❌ Anvil not found. Please install Foundry."
-    exit 1
+if [ "$NETWORK" == "local" ]; then
+    if ! command -v anvil &> /dev/null; then
+        echo "❌ Anvil not found. Please install Foundry."
+        exit 1
+    fi
 fi
 
 if ! command -v go &> /dev/null; then
@@ -114,6 +242,13 @@ cleanup() {
         sleep 1
     fi
     
+    # Stop Facilitator service
+    if [ ! -z "$FACILITATOR_PID" ]; then
+        echo "🔴 Stopping Facilitator service (PID: $FACILITATOR_PID)..."
+        kill $FACILITATOR_PID 2>/dev/null || true
+        sleep 1
+    fi
+
     # Stop Bridge service
     if [ ! -z "$BRIDGE_PID" ]; then
         echo "🔴 Stopping Bridge service (PID: $BRIDGE_PID)..."
@@ -130,6 +265,17 @@ cleanup() {
             sleep 2
         fi
         rm -f anvil-per-epoch.pid anvil-per-epoch.log
+    fi
+
+    # Stop the facilitator if running
+    if [ ! -z "$FACILITATOR_PID" ] && kill -0 $FACILITATOR_PID 2>/dev/null; then
+        echo "🔴 Stopping Facilitator (PID: $FACILITATOR_PID)..."
+        kill $FACILITATOR_PID
+    fi
+    # Also kill any other processes on port 3002
+    if lsof -i :3002 > /dev/null 2>&1; then
+        echo "🔴 Stopping any remaining Facilitator processes on port 3002..."
+        lsof -ti :3002 | xargs kill -9 2>/dev/null || true
     fi
 
     # Stop the bridge if running
@@ -290,92 +436,422 @@ else
     echo "⏭️  Skipping Dgraph readiness check (not started)"
 fi
 
-# === COMPLETE RESET FOR FRESH START ===
-echo "🔄 Ensuring fresh start..."
-echo "Cleaning up ALL existing Anvil instances..."
-pkill -f anvil 2>/dev/null || true
-sleep 2
+# === NETWORK-SPECIFIC SETUP ===
+if [ "$NETWORK" == "local" ]; then
+    # === COMPLETE RESET FOR FRESH START (Local Anvil Only) ===
+    echo "🔄 Ensuring fresh start..."
+    echo "Cleaning up ALL existing Anvil instances..."
+    pkill -f anvil 2>/dev/null || true
+    sleep 2
 
-# Force kill port 8545 if still in use
-if lsof -i :8545 >/dev/null 2>&1; then
-    echo "   Port 8545 still in use, force killing..."
-    lsof -ti :8545 | xargs kill -9 2>/dev/null || true
-    sleep 1
-fi
+    # Force kill port 8545 if still in use
+    if lsof -i :8545 >/dev/null 2>&1; then
+        echo "   Port 8545 still in use, force killing..."
+        lsof -ti :8545 | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
 
-# Clean up all artifacts for fresh deployment
-rm -f anvil-per-epoch.pid anvil-per-epoch.log
-rm -f contract_addresses.json
-rm -f erc8004_deployment.json
-echo "✅ Clean slate ready for fresh deployment"
+    # Clean up all artifacts for fresh deployment
+    rm -f anvil-per-epoch.pid anvil-per-epoch.log
+    rm -f contract_addresses.json
+    rm -f erc8004_deployment.json
+    echo "✅ Clean slate ready for fresh deployment"
 
-# Start fresh Anvil blockchain
-echo "Starting fresh Anvil blockchain from genesis block..."
-nohup anvil \
-    --accounts 10 \
-    --balance 10000 \
-    --port 8545 \
-    --host 0.0.0.0 \
-    --mnemonic "test test test test test test test test test test test junk" \
-    > anvil-per-epoch.log 2>&1 &
+    # Start fresh Anvil blockchain
+    echo "Starting fresh Anvil blockchain from genesis block..."
+    nohup anvil \
+        --accounts 10 \
+        --balance 10000 \
+        --port 8545 \
+        --host 0.0.0.0 \
+        --mnemonic "test test test test test test test test test test test junk" \
+        > anvil-per-epoch.log 2>&1 &
 
-ANVIL_PID=$!
-echo $ANVIL_PID > anvil-per-epoch.pid
+    ANVIL_PID=$!
+    echo $ANVIL_PID > anvil-per-epoch.pid
 
-# Wait for Anvil to be ready
-echo "Waiting for Anvil to be ready..."
-for i in {1..10}; do
-    if curl -s -X POST -H "Content-Type: application/json" \
-       --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-       http://localhost:8545 >/dev/null 2>&1; then
-        
-        BLOCK_NUM=$(curl -s -X POST -H "Content-Type: application/json" \
+    # Wait for Anvil to be ready
+    echo "Waiting for Anvil to be ready..."
+    for i in {1..10}; do
+        if curl -s -X POST -H "Content-Type: application/json" \
            --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-           http://localhost:8545 | grep -o '"result":"0x[0-9a-f]*"' | cut -d'"' -f4)
-        BLOCK_DEC=$((16#${BLOCK_NUM#0x}))
-        
-        echo "✅ Anvil is ready (PID: $ANVIL_PID) - Starting from block $BLOCK_DEC"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo "❌ Anvil failed to start"
-        cleanup
-        exit 1
-    fi
-    sleep 1
-done
+           http://localhost:8545 >/dev/null 2>&1; then
 
-# === PHASE 2: DEPLOY MAINNET CONTRACTS WITH ERC-8004 IDENTITY ===
-echo ""
-echo "📋 PHASE 2: Deploying Mainnet Contracts with ERC-8004 Identity"
-echo "────────────────────────────────────────────"
+            BLOCK_NUM=$(curl -s -X POST -H "Content-Type: application/json" \
+               --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+               http://localhost:8545 | grep -o '"result":"0x[0-9a-f]*"' | cut -d'"' -f4)
+            BLOCK_DEC=$((16#${BLOCK_NUM#0x}))
 
-# Configuration
-PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-VALIDATOR1_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-VALIDATOR2_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-VALIDATOR3_KEY="0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
-VALIDATOR4_KEY="0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
-MINER_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
-RPC_URL="http://localhost:8545"
-
-DEPLOYER="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-VALIDATOR1="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-VALIDATOR2="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
-VALIDATOR3="0x90F79bf6EB2c4f870365E785982E1f101E93b906"
-VALIDATOR4="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
-MINER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
-CLIENT="$VALIDATOR2"  # Client for x402 payments (using VALIDATOR2 to match Go demo)
-
-# Determine correct forge path
-if [ -n "$SUDO_USER" ]; then
-    USER_HOME=$(eval echo ~$SUDO_USER)
-    FORGE_PATH="$USER_HOME/.foundry/bin/forge"
-    CAST_PATH="$USER_HOME/.foundry/bin/cast"
+            echo "✅ Anvil is ready (PID: $ANVIL_PID) - Starting from block $BLOCK_DEC"
+            break
+        fi
+        if [ $i -eq 10 ]; then
+            echo "❌ Anvil failed to start"
+            cleanup
+            exit 1
+        fi
+        sleep 1
+    done
 else
-    FORGE_PATH="$HOME/.foundry/bin/forge"
-    CAST_PATH="$HOME/.foundry/bin/cast"
+    echo "⏭️  Skipping Anvil startup (using Sepolia testnet)"
+    echo "   Connecting to: $RPC_URL"
+    echo ""
 fi
+
+# === PHASE 2: CONTRACT SETUP ===
+echo ""
+if [ "$NETWORK" == "sepolia" ]; then
+    echo "📋 PHASE 2: Using Existing Sepolia Contracts"
+    echo "────────────────────────────────────────────"
+    echo "   IdentityRegistry: $IDENTITY_ADDRESS"
+    echo "   ValidationRegistry: $VALIDATION_ADDRESS"
+    echo "   ReputationRegistry: $REPUTATION_ADDRESS"
+    echo "   USDC Token: $PAYMENT_TOKEN_ADDRESS"
+    echo ""
+
+    # Create contract_addresses.json for Sepolia
+    echo "📝 Creating contract_addresses.json for Sepolia..."
+    cat > contract_addresses.json << EOF
+{
+  "IdentityRegistry": "$IDENTITY_ADDRESS",
+  "ValidationRegistry": "$VALIDATION_ADDRESS",
+  "ReputationRegistry": "$REPUTATION_ADDRESS",
+  "PaymentToken": "$PAYMENT_TOKEN_ADDRESS",
+  "USDC": "$USDC_ADDRESS",
+  "FLUXToken": "$FLUX_TOKEN_ADDRESS",
+  "HETUToken": "$HETU_TOKEN_ADDRESS",
+  "PoCWVerifier": "$POCW_VERIFIER_ADDRESS",
+  "SubnetRegistry": "$SUBNET_REGISTRY_ADDRESS",
+  "x402PaymentEscrow": "$X402_PAYMENT_ESCROW_ADDRESS"
+}
+EOF
+    echo "   ✅ contract_addresses.json created"
+    echo ""
+
+    # Set additional contract variable aliases for compatibility with rest of script
+    HETU_ADDRESS="$HETU_TOKEN_ADDRESS"
+    FLUX_ADDRESS="$FLUX_TOKEN_ADDRESS"
+    REGISTRY_ADDRESS="$SUBNET_REGISTRY_ADDRESS"
+    VERIFIER_ADDRESS="$POCW_VERIFIER_ADDRESS"
+    ESCROW_ADDRESS="$X402_PAYMENT_ESCROW_ADDRESS"
+
+    # Check if miner already has an agent ID registered
+    echo "🆔 Checking miner registration..."
+    AGENT_ID_FILE=".sepolia_agent_id_${MINER}"
+    AGENT_ID_DEC=""
+
+    # First, check if miner owns any identity tokens using balanceOf
+    TOKEN_BALANCE=$($CAST_PATH call $IDENTITY_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL 2>/dev/null || echo "0")
+
+    if [ "$TOKEN_BALANCE" != "0" ] && [ "$TOKEN_BALANCE" -gt 0 ]; then
+        echo "   📋 Miner already has $TOKEN_BALANCE agent ID(s) registered on-chain"
+
+        # Check if we have it stored locally
+        if [ -f "$AGENT_ID_FILE" ]; then
+            AGENT_ID_DEC=$(cat "$AGENT_ID_FILE")
+            echo "   📋 Using stored Agent ID: $AGENT_ID_DEC"
+
+            # Verify ownership
+            OWNER=$($CAST_PATH call $IDENTITY_ADDRESS "ownerOf(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null || echo "0x0")
+            if [ "${OWNER,,}" != "${MINER,,}" ]; then
+                echo "   ⚠️  Stored Agent ID is invalid, please find correct ID"
+                echo "   Check: https://sepolia.etherscan.io/token/$IDENTITY_ADDRESS?a=$MINER"
+                echo "   Save the correct Agent ID to: $AGENT_ID_FILE"
+                exit 1
+            fi
+            echo "   ✅ Verified: Miner owns Agent ID $AGENT_ID_DEC"
+        else
+            echo "   ⚠️  Agent ID not found locally"
+            echo "   Please find your agent ID on Sepolia Etherscan:"
+            echo "   https://sepolia.etherscan.io/token/$IDENTITY_ADDRESS?a=$MINER"
+            echo "   Then save it to: $AGENT_ID_FILE"
+            echo ""
+            echo "   Example: echo \"YOUR_AGENT_ID\" > $AGENT_ID_FILE"
+            exit 1
+        fi
+    else
+        echo "   📋 No agent ID found on-chain, will register new identity"
+
+        # Register miner with ERC-8004 identity
+        echo "   🆔 Registering miner with ERC-8004 identity on Sepolia..."
+
+        REGISTER_TX=$($CAST_PATH send $IDENTITY_ADDRESS "register()" \
+            --private-key $MINER_KEY \
+            --rpc-url $RPC_URL \
+            --gas-limit 300000 --json 2>&1)
+
+        if echo "$REGISTER_TX" | grep -q "blockHash\|transactionHash"; then
+            echo "      ✅ Registration transaction confirmed"
+
+            # Parse the Registered event from logs to get the actual agent ID
+            TX_HASH=$(echo "$REGISTER_TX" | jq -r '.transactionHash' 2>/dev/null || echo "")
+
+            # Wait for transaction to be indexed
+            sleep 5
+
+            # Parse agent ID from transaction receipt
+            if [ -n "$TX_HASH" ]; then
+                echo "      📋 Fetching transaction receipt..."
+                RECEIPT=$($CAST_PATH receipt $TX_HASH --rpc-url $RPC_URL --json 2>&1)
+
+                # The Registered event has agentId as the first indexed parameter (topics[1])
+                AGENT_ID_HEX=$(echo "$RECEIPT" | jq -r '.logs[0].topics[1]' 2>/dev/null || echo "0x0")
+
+                if [ "$AGENT_ID_HEX" != "0x0" ] && [ -n "$AGENT_ID_HEX" ]; then
+                    AGENT_ID_DEC=$((AGENT_ID_HEX))
+                    echo "      ✅ Agent ID assigned: $AGENT_ID_DEC"
+                else
+                    echo "      ❌ Could not parse agent ID from receipt"
+                    exit 1
+                fi
+            else
+                echo "      ❌ No transaction hash available"
+                exit 1
+            fi
+
+            # Verify ownership
+            OWNER=$($CAST_PATH call $IDENTITY_ADDRESS "ownerOf(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null)
+
+            if [ "${OWNER,,}" == "${MINER,,}" ]; then
+                # Save agent ID for future runs
+                echo "$AGENT_ID_DEC" > "$AGENT_ID_FILE"
+                echo "      💾 Saved Agent ID to $AGENT_ID_FILE"
+            else
+                echo "      ❌ WARNING: Ownership verification failed!"
+                echo "      Owner: $OWNER"
+                echo "      Miner: $MINER"
+                exit 1
+            fi
+        else
+            echo "      ❌ Registration failed!"
+            echo "      Error: $REGISTER_TX"
+            exit 1
+        fi
+    fi
+
+    # Distribute HETU and USDC tokens to participants
+    echo ""
+    echo "💰 Distributing tokens to participants on Sepolia..."
+
+    # Check deployer HETU balance first
+    DEPLOYER_HETU_BALANCE=$($CAST_PATH call $HETU_TOKEN_ADDRESS "balanceOf(address)(uint256)" $DEPLOYER --rpc-url $RPC_URL 2>/dev/null || echo "0")
+    DEPLOYER_HETU_READABLE=$($CAST_PATH --to-unit $DEPLOYER_HETU_BALANCE ether 2>/dev/null || echo "0")
+    echo "   Deployer HETU balance: $DEPLOYER_HETU_READABLE HETU"
+
+    # Distribute HETU to miner and validators (2000 each)
+    # Check if miner has enough HETU first (compare in ether units to avoid large numbers)
+    MINER_BALANCE_WEI=$($CAST_PATH call $HETU_TOKEN_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+    MINER_BALANCE_ETHER=$($CAST_PATH --to-unit $MINER_BALANCE_WEI ether 2>/dev/null | awk '{print $1}' || echo "0")
+    REQUIRED_ETHER="2000"
+
+    if (( $(echo "$MINER_BALANCE_ETHER >= $REQUIRED_ETHER" | bc -l) )); then
+        echo "   ✅ Miner already has $MINER_BALANCE_ETHER HETU (≥2000 required) - skipping"
+    else
+        echo "   📤 Sending 2000 HETU to miner (waiting for Sepolia confirmation)..."
+        REQUIRED_AMOUNT=$($CAST_PATH --to-wei 2000 | awk '{print $1}')
+        TRANSFER_OUTPUT=$($CAST_PATH send $HETU_TOKEN_ADDRESS "transfer(address,uint256)" $MINER $REQUIRED_AMOUNT \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1)
+
+        if [ $? -eq 0 ]; then
+            echo "      ✅ Miner funded with 2000 HETU"
+        else
+            echo "      ❌ Transfer failed: $TRANSFER_OUTPUT"
+        fi
+    fi
+
+    for i in 1 2 3 4; do
+        VALIDATOR_KEY_VAR="VALIDATOR${i}_KEY"
+        VALIDATOR_ADDR_VAR="VALIDATOR${i}"
+        VALIDATOR_KEY="${!VALIDATOR_KEY_VAR}"
+        VALIDATOR_ADDR="${!VALIDATOR_ADDR_VAR}"
+
+        # Check if validator has enough HETU first (compare in ether units to avoid large numbers)
+        VALIDATOR_BALANCE_WEI=$($CAST_PATH call $HETU_TOKEN_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR_ADDR --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+        VALIDATOR_BALANCE_ETHER=$($CAST_PATH --to-unit $VALIDATOR_BALANCE_WEI ether 2>/dev/null | awk '{print $1}' || echo "0")
+        REQUIRED_ETHER="2000"
+
+        if (( $(echo "$VALIDATOR_BALANCE_ETHER >= $REQUIRED_ETHER" | bc -l) )); then
+            echo "   ✅ Validator-${i} already has $VALIDATOR_BALANCE_ETHER HETU (≥2000 required) - skipping"
+        else
+            echo "   📤 Sending 2000 HETU to Validator-${i} (waiting for confirmation)..."
+            REQUIRED_AMOUNT=$($CAST_PATH --to-wei 2000 | awk '{print $1}')
+            TRANSFER_OUTPUT=$($CAST_PATH send $HETU_TOKEN_ADDRESS "transfer(address,uint256)" $VALIDATOR_ADDR $REQUIRED_AMOUNT \
+                --private-key $PRIVATE_KEY --rpc-url $RPC_URL 2>&1)
+
+            if [ $? -eq 0 ]; then
+                echo "      ✅ Validator-${i} funded with 2000 HETU"
+            else
+                echo "      ❌ Transfer failed: $TRANSFER_OUTPUT"
+            fi
+        fi
+    done
+
+    # Distribute to client (1000 HETU + 1000 USDC)
+    # Check if client has enough HETU first (compare in ether units to avoid large numbers)
+    CLIENT_HETU_BALANCE_WEI=$($CAST_PATH call $HETU_TOKEN_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+    CLIENT_HETU_BALANCE_ETHER=$($CAST_PATH --to-unit $CLIENT_HETU_BALANCE_WEI ether 2>/dev/null | awk '{print $1}' || echo "0")
+    REQUIRED_ETHER="1000"
+
+    if (( $(echo "$CLIENT_HETU_BALANCE_ETHER >= $REQUIRED_ETHER" | bc -l) )); then
+        echo "   ✅ Client already has $CLIENT_HETU_BALANCE_ETHER HETU (≥1000 required) - skipping"
+    else
+        echo "   📤 Sending 1000 HETU to client (waiting for confirmation)..."
+        $CAST_PATH send $HETU_TOKEN_ADDRESS "transfer(address,uint256)" $CLIENT $($CAST_PATH --to-wei 1000) \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "      ✅ Client funded with 1000 HETU"
+        else
+            echo "      ⚠️  Client might already have HETU or transfer failed"
+        fi
+    fi
+
+    # Check if client has enough USDC first
+    CLIENT_USDC_BALANCE=$($CAST_PATH call $USDC_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+    REQUIRED_CLIENT_USDC="1000000000"  # 1000 USDC with 6 decimals
+
+    if [ "$CLIENT_USDC_BALANCE" -ge "$REQUIRED_CLIENT_USDC" ]; then
+        CLIENT_USDC_READABLE=$(echo "scale=2; $CLIENT_USDC_BALANCE / 1000000" | bc)
+        echo "   ✅ Client already has ${CLIENT_USDC_READABLE} USDC (≥1000 required) - skipping"
+    else
+        echo "   📤 Minting 1000 USDC to client (waiting for confirmation)..."
+        # USDC uses 6 decimals, so 1000 USDC = 1000 * 10^6
+        USDC_AMOUNT_CLIENT="1000000000"  # 1000 USDC with 6 decimals
+        $CAST_PATH send $USDC_ADDRESS "mint(address,uint256)" $CLIENT $USDC_AMOUNT_CLIENT \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "      ✅ Client funded with 1000 USDC"
+        else
+            echo "      ⚠️  Client might already have USDC or mint failed"
+        fi
+    fi
+
+    # Distribute USDC to V1 Coordinator (Validator1) for demo payments
+    # Check if V1 Coordinator has enough USDC first
+    V1_USDC_BALANCE=$($CAST_PATH call $USDC_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+    REQUIRED_V1_USDC="100000000"  # 100 USDC with 6 decimals
+
+    if [ "$V1_USDC_BALANCE" -ge "$REQUIRED_V1_USDC" ]; then
+        V1_USDC_READABLE=$(echo "scale=2; $V1_USDC_BALANCE / 1000000" | bc)
+        echo "   ✅ V1 Coordinator already has ${V1_USDC_READABLE} USDC (≥100 required) - skipping"
+    else
+        echo "   📤 Minting 100 USDC to V1 Coordinator (Validator-1) (waiting for confirmation)..."
+        # USDC uses 6 decimals, so 100 USDC = 100 * 10^6
+        USDC_AMOUNT_V1="100000000"  # 100 USDC with 6 decimals
+        $CAST_PATH send $USDC_ADDRESS "mint(address,uint256)" $VALIDATOR1 $USDC_AMOUNT_V1 \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "      ✅ V1 Coordinator funded with 100 USDC"
+        else
+            echo "      ⚠️  V1 Coordinator might already have USDC or mint failed"
+        fi
+    fi
+
+    echo "   ✅ Token distribution complete"
+    echo ""
+
+    # Check if SubnetRegistry is initialized, initialize if needed
+    echo "🔧 Checking SubnetRegistry initialization..."
+    IS_INITIALIZED=$($CAST_PATH call $SUBNET_REGISTRY_ADDRESS "initialized()(bool)" --rpc-url $RPC_URL 2>/dev/null || echo "false")
+
+    if [ "$IS_INITIALIZED" == "false" ]; then
+        echo "   ⚠️  SubnetRegistry not initialized, initializing now..."
+        $CAST_PATH send $SUBNET_REGISTRY_ADDRESS "initialize(address,address,address)" \
+            "$HETU_TOKEN_ADDRESS" \
+            "$IDENTITY_REGISTRY_ADDRESS" \
+            "$VALIDATION_REGISTRY_ADDRESS" \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "   ✅ SubnetRegistry initialized successfully"
+        else
+            echo "   ❌ SubnetRegistry initialization failed"
+            exit 1
+        fi
+    else
+        echo "   ✅ SubnetRegistry already initialized"
+    fi
+    echo ""
+
+    # Check if PoCWVerifier is initialized, initialize if needed
+    echo "🔧 Checking PoCWVerifier initialization..."
+    IS_POCW_INITIALIZED=$($CAST_PATH call $POCW_VERIFIER_ADDRESS "initialized()(bool)" --rpc-url $RPC_URL 2>/dev/null || echo "false")
+
+    if [ "$IS_POCW_INITIALIZED" == "false" ]; then
+        echo "   ⚠️  PoCWVerifier not initialized, initializing now..."
+        $CAST_PATH send $POCW_VERIFIER_ADDRESS "initialize(address,address)" \
+            "$FLUX_TOKEN_ADDRESS" \
+            "$SUBNET_REGISTRY_ADDRESS" \
+            --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "   ✅ PoCWVerifier initialized successfully"
+        else
+            echo "   ❌ PoCWVerifier initialization failed"
+            exit 1
+        fi
+    else
+        echo "   ✅ PoCWVerifier already initialized"
+    fi
+    echo ""
+
+    # Note: For Sepolia, all variables are already set from .env.sepolia loaded earlier
+    # Skip deployment, contracts already exist on Sepolia
+else
+    echo "📋 PHASE 2: Deploying Mainnet Contracts with ERC-8004 Identity"
+    echo "────────────────────────────────────────────"
+
+    # Configuration for local Anvil
+    PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    VALIDATOR1_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    VALIDATOR2_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+    VALIDATOR3_KEY="0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
+    VALIDATOR4_KEY="0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
+    MINER_KEY="0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
+    # Facilitator and Client addresses from .env.local
+    FACILITATOR_KEY="$FACILITATOR_KEY"
+    FACILITATOR="$FACILITATOR_ADDRESS"
+    CLIENT="$CLIENT_ADDRESS"
+    RPC_URL="http://localhost:8545"
+
+    DEPLOYER="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    VALIDATOR1="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    VALIDATOR2="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    VALIDATOR3="0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    VALIDATOR4="0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
+    MINER="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+
+    # Export addresses and keys for Go code to use
+    export CLIENT_ADDRESS="$CLIENT"
+    export MINER_ADDRESS="$MINER"
+    export CLIENT_KEY="$PRIVATE_KEY_CLIENT"  # Use the actual client key from .env.local
+    export MINER_KEY="$MINER_KEY"
+fi  # End of network-specific configuration
+
+# Helper function to format wei to tokens (works for both FLUX and USDC)
+format_flux_balance() {
+    local wei_value=$1
+    local decimals=${2:-18}  # Default to 18 decimals (FLUX), can pass 6 for USDC
+
+    # Convert scientific notation to decimal if needed
+    local decimal_value=$(printf "%.0f" $wei_value 2>/dev/null || echo $wei_value)
+
+    # Convert from wei based on decimals
+    if [ "$decimals" == "6" ]; then
+        # USDC has 6 decimals
+        local token_value=$(echo "scale=2; $decimal_value / 1000000" | bc -l)
+    else
+        # FLUX has 18 decimals
+        local token_value=$(echo "scale=6; $decimal_value / 1000000000000000000" | bc -l)
+    fi
+
+    echo $token_value
+}
+
+# Only compile and deploy for local network
+if [ "$NETWORK" == "local" ]; then
 
 # Compile contracts
 echo "Compiling contracts..."
@@ -539,6 +1015,16 @@ else
     echo "   ⚠️  Failed to authorize V1 Coordinator"
 fi
 
+# Authorize Facilitator as coordinator in x402PaymentEscrow
+echo "Authorizing x402 Facilitator as payment coordinator..."
+timeout 3 $CAST_PATH send $ESCROW_ADDRESS "authorizeCoordinator(address)" $FACILITATOR \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ Facilitator authorized successfully"
+else
+    echo "   ⚠️  Failed to authorize Facilitator"
+fi
+
 # Distribute HETU and setup subnet
 echo "Setting up subnet participants..."
 timeout 3 $CAST_PATH send $HETU_ADDRESS "transfer(address,uint256)" $MINER $($CAST_PATH --to-wei 2000) \
@@ -562,7 +1048,8 @@ else
 fi
 timeout 3 $CAST_PATH send $HETU_ADDRESS "transfer(address,uint256)" $CLIENT $($CAST_PATH --to-wei 1000) \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
-timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "mint(address,uint256)" $CLIENT $($CAST_PATH --to-wei 1000) \
+# USDC uses 6 decimals, so 1000 USDC = 1000 * 10^6 = 1000000000
+timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "mint(address,uint256)" $CLIENT "1000000000" \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
 echo "   Client ($CLIENT) setup complete:"
 echo "   - ETH for gas (see above)"
@@ -570,15 +1057,55 @@ echo "   - 1000 HETU tokens"
 echo "   - 1000 $PAYMENT_TOKEN tokens for task payments"
 
 echo "💵 Bootstrapping V1 Coordinator with $PAYMENT_TOKEN for demo payments..."
-timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "mint(address,uint256)" $VALIDATOR1 $($CAST_PATH --to-wei 100) \
+# USDC uses 6 decimals, so 100 USDC = 100 * 10^6 = 100000000
+timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "mint(address,uint256)" $VALIDATOR1 "100000000" \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
 echo "   V1 Coordinator ($VALIDATOR1) bootstrapped with:"
 echo "   - 100 $PAYMENT_TOKEN tokens for demo payment distribution"
 
-echo "🔓 Approving escrow to spend client's $PAYMENT_TOKEN..."
-# Client approves escrow contract to spend payment tokens for payments (unlimited approval)
-# Client is VALIDATOR2 (account #2): 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
-CLIENT_KEY="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+echo "💵 Bootstrapping x402 Facilitator with $PAYMENT_TOKEN..."
+# Fund facilitator with USDC for payment operations
+# USDC uses 6 decimals, so 500 USDC = 500 * 10^6 = 500000000
+timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "mint(address,uint256)" $FACILITATOR "500000000" \
+    --private-key $PRIVATE_KEY --rpc-url $RPC_URL > /dev/null 2>&1 || true
+echo "   x402 Facilitator ($FACILITATOR) bootstrapped with:"
+if [ "$NETWORK" == "local" ]; then
+    echo "   - ETH for gas (Anvil pre-funded)"
+else
+    echo "   - ETH for gas (funded separately via fund-facilitator.sh)"
+fi
+echo "   - 500 $PAYMENT_TOKEN tokens for payment operations"
+
+echo "🔓 Approving escrow to spend facilitator's $PAYMENT_TOKEN..."
+# Facilitator approves escrow contract to spend payment tokens
+timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
+    --private-key $FACILITATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ Facilitator approved escrow for $PAYMENT_TOKEN spending"
+else
+    echo "   ⚠️  Failed to approve escrow for facilitator"
+fi
+
+echo "🔓 Approving facilitator to spend client's $PAYMENT_TOKEN (for direct payments)..."
+# Client approves facilitator to spend payment tokens for direct payments
+# For local: CLIENT=$VALIDATOR2, so use VALIDATOR2_KEY
+# For Sepolia: use PRIVATE_KEY_CLIENT from environment
+if [ "$NETWORK" == "local" ]; then
+    CLIENT_KEY="$PRIVATE_KEY_CLIENT"  # Use the actual client key from .env.local
+else
+    CLIENT_KEY="$PRIVATE_KEY_CLIENT"
+fi
+
+timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $FACILITATOR "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
+    --private-key $CLIENT_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "   ✅ Client approved facilitator to spend $PAYMENT_TOKEN"
+else
+    echo "   ⚠️  Failed to approve facilitator"
+fi
+
+echo "🔓 Approving escrow to spend client's $PAYMENT_TOKEN (for escrow payments)..."
+# Client approves escrow contract to spend payment tokens for escrow payments
 timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
     --private-key $CLIENT_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
@@ -598,7 +1125,7 @@ for i in 0 1 2 3; do
 done
 
 # Subnet registration will happen AFTER VLC validation passes
-SUBNET_ID="per-epoch-subnet-001"
+SUBNET_ID="subnet-1"  # Use the registered subnet name for Sepolia
 
 # Generate contract addresses JSON for bridge and inspector (name -> address format)
 cat > contract_addresses.json << EOF
@@ -653,16 +1180,6 @@ echo "   Agent Info:"
 echo "   ├─ Agent ID: #$AGENT_ID_DEC"
 echo "   └─ Agent Address: $MINER"
 
-# Helper function to format wei to FLUX tokens
-format_flux_balance() {
-    local wei_value=$1
-    # Convert scientific notation to decimal if needed
-    local decimal_value=$(printf "%.0f" $wei_value 2>/dev/null || echo $wei_value)
-    # Convert from wei (divide by 10^18)
-    local flux_value=$(echo "scale=6; $decimal_value / 1000000000000000000" | bc -l)
-    echo $flux_value
-}
-
 # === INITIAL FLUX BALANCES ===
 echo ""
 echo "💰 Initial FLUX Token Balances (Before Mining)"
@@ -702,19 +1219,21 @@ echo "💵 $PAYMENT_TOKEN Token Balances (x402 Payment System)"
 echo "────────────────────────────────────────────────"
 echo "📊 Client ($CLIENT):"
 CLIENT_PAYMENT=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL)
-CLIENT_PAYMENT_FORMATTED=$(format_flux_balance $CLIENT_PAYMENT)
+CLIENT_PAYMENT_FORMATTED=$(format_flux_balance $CLIENT_PAYMENT 6)
 echo "   Balance: $CLIENT_PAYMENT_FORMATTED $PAYMENT_TOKEN"
 
 echo "📊 Miner/Agent ($MINER):"
 MINER_PAYMENT=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL)
-MINER_PAYMENT_FORMATTED=$(format_flux_balance $MINER_PAYMENT)
+MINER_PAYMENT_FORMATTED=$(format_flux_balance $MINER_PAYMENT 6)
 echo "   Balance: $MINER_PAYMENT_FORMATTED $PAYMENT_TOKEN"
 
 echo "📊 V1 Coordinator ($VALIDATOR1):"
 V1_PAYMENT=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL)
-V1_PAYMENT_FORMATTED=$(format_flux_balance $V1_PAYMENT)
+V1_PAYMENT_FORMATTED=$(format_flux_balance $V1_PAYMENT 6)
 echo "   Balance: $V1_PAYMENT_FORMATTED $PAYMENT_TOKEN"
 echo ""
+
+fi  # End of local deployment block
 
 # === PHASE 3: PER-EPOCH DEMONSTRATION ===
 echo ""
@@ -742,8 +1261,72 @@ echo "  5. Process repeats for each new epoch"
 echo ""
 echo "🎯 Expected behavior:"
 echo "  - Epoch 1 (rounds 1-3): Submit after task 3 completes"
-echo "  - Epoch 2 (rounds 4-6): Submit after task 6 completes" 
+echo "  - Epoch 2 (rounds 4-6): Submit after task 6 completes"
 echo "  - Partial epoch 3 (round 7): Submit after demo ends"
+echo ""
+
+# Auto-launch x402 Facilitator Service
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🚀 LAUNCHING X402 FACILITATOR"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Kill any existing facilitator process on port 3002
+if lsof -i :3002 > /dev/null 2>&1; then
+    echo "⚠️  Found existing facilitator on port 3002, killing it..."
+    lsof -ti :3002 | xargs kill -9 2>/dev/null || true
+    sleep 2
+fi
+
+# Use dedicated facilitator account
+echo "🔧 Starting x402 Facilitator with payment mode: $PAYMENT_MODE"
+echo "   Using dedicated facilitator: $FACILITATOR"
+
+# Start the facilitator in the background
+# For local: use VALIDATOR1, VALIDATOR2, etc.
+# For Sepolia: use VALIDATOR_1_ACCOUNT, VALIDATOR_2_ACCOUNT, etc.
+if [ "$NETWORK" == "local" ]; then
+    VALIDATOR_LIST="$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4"
+else
+    VALIDATOR_LIST="$VALIDATOR_1_ACCOUNT,$VALIDATOR_2_ACCOUNT,$VALIDATOR_3_ACCOUNT,$VALIDATOR_4_ACCOUNT"
+fi
+
+NETWORK=$NETWORK \
+RPC_URL=$RPC_URL \
+FACILITATOR_KEY=$FACILITATOR_KEY \
+ESCROW_ADDRESS=$ESCROW_ADDRESS \
+PAYMENT_TOKEN_ADDRESS=$PAYMENT_TOKEN_ADDRESS \
+VALIDATORS="$VALIDATOR_LIST" \
+PAYMENT_MODE=$PAYMENT_MODE \
+FACILITATOR_PORT=3002 \
+node facilitator.js > facilitator.log 2>&1 &
+FACILITATOR_PID=$!
+
+# Wait for facilitator to be ready
+echo "⏳ Waiting for facilitator to be ready..."
+MAX_ATTEMPTS=30
+for i in $(seq 1 $MAX_ATTEMPTS); do
+    if curl -s http://localhost:3002/health > /dev/null 2>&1; then
+        echo "✅ Facilitator is ready and accepting requests"
+
+        # Get and display facilitator capabilities
+        CAPABILITIES=$(curl -s http://localhost:3002/health | grep -o '"capabilities":\[[^]]*\]' | sed 's/"capabilities":\[//' | sed 's/\]//' | sed 's/"//g' | sed 's/,/, /g')
+        echo "   Capabilities: $CAPABILITIES"
+        break
+    fi
+
+    if [ $i -eq $MAX_ATTEMPTS ]; then
+        echo "❌ Facilitator failed to start after $MAX_ATTEMPTS attempts"
+        echo "   Check facilitator.log for details"
+        exit 1
+    fi
+
+    echo "   Attempt $i/$MAX_ATTEMPTS..."
+    sleep 1
+done
+
+# Export facilitator URL for Go program
+export FACILITATOR_URL="http://localhost:3002"
+echo "📡 Facilitator URL exported: $FACILITATOR_URL"
 echo ""
 
 # Kill any existing bridge process on port 3001
@@ -873,31 +1456,44 @@ if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
 fi
 
 echo ""
-echo "✅ VLC Validation PASSED - proceeding with subnet registration"
+echo "✅ VLC Validation PASSED"
 echo ""
 
-# Step 1.5: Submit validation results from ALL validators to ValidationRegistry
-echo "📝 Submitting VLC validation results from all validators to ValidationRegistry..."
+# Step 1.5: Submit validation result from Validator-1 ONLY to ValidationRegistry
+echo "📝 Submitting VLC validation result to ValidationRegistry..."
 
-# Arrays for validators
-VALIDATORS=("$VALIDATOR1" "$VALIDATOR2" "$VALIDATOR3" "$VALIDATOR4")
-VALIDATOR_KEYS=("$VALIDATOR1_KEY" "$VALIDATOR2_KEY" "$VALIDATOR3_KEY" "$VALIDATOR4_KEY")
-VALIDATOR_NAMES=("Validator-1" "Validator-2" "Validator-3" "Validator-4")
+# Only use Validator-1 for validation
+VALIDATOR=$VALIDATOR1
+VALIDATOR_KEY=$VALIDATOR1_KEY
+VALIDATOR_NAME="Validator-1"
 
-# Each validator submits their own validation
-for i in {0..3}; do
-    VALIDATOR=${VALIDATORS[$i]}
-    VALIDATOR_KEY=${VALIDATOR_KEYS[$i]}
-    VALIDATOR_NAME=${VALIDATOR_NAMES[$i]}
+# Generate unique request hash
+REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
+REQUEST_HASH="0x${REQUEST_HASH}"
 
-    # Generate unique request hash for each validator
-    REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
-    REQUEST_HASH="0x${REQUEST_HASH}"
+echo ""
+echo "   📋 ${VALIDATOR_NAME} submitting validation..."
 
-    echo ""
-    echo "   📋 ${VALIDATOR_NAME} submitting validation..."
+# Submit validation request (miner creates request for validator to validate)
+if [ "$NETWORK" == "sepolia" ]; then
+    # On Sepolia, capture output to show errors
+    VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
+        "$VALIDATOR" \
+        "$AGENT_ID_DEC" \
+        "VLC Protocol Validation Test" \
+        "$REQUEST_HASH" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
+    VALIDATION_RESULT=$?
 
-    # Submit validation request (miner creates request for validator to validate)
+    if [ $VALIDATION_RESULT -ne 0 ]; then
+        echo "      ⚠️  Failed to create validation request"
+        echo "      Error details: $VALIDATION_OUTPUT"
+        echo "❌ Validation submission failed - cannot proceed"
+        cleanup
+        exit 1
+    fi
+else
+    # On local, hide output as before
     $CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
         "$VALIDATOR" \
         "$AGENT_ID_DEC" \
@@ -907,18 +1503,33 @@ for i in {0..3}; do
 
     if [ $? -ne 0 ]; then
         echo "      ⚠️  Failed to create validation request"
-        continue
+        echo "❌ Validation submission failed - cannot proceed"
+        cleanup
+        exit 1
     fi
+fi
 
-    # All validators give perfect score for VLC validation (protocol correctness)
-    SCORE=100  # VLC validation passes with perfect score
+# Validator gives score for VLC validation (protocol correctness)
+SCORE=100  # VLC validation passes with perfect score from Go validation
 
-    # Submit validation response with score
-    RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
-    RESPONSE_HASH="0x${RESPONSE_HASH}"
-    VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
-    VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
+# Submit validation response with score
+RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
+RESPONSE_HASH="0x${RESPONSE_HASH}"
+VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
+VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
 
+if [ "$NETWORK" == "sepolia" ]; then
+    # On Sepolia, capture output to show errors
+    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+        "$REQUEST_HASH" \
+        "$SCORE" \
+        "VLC validation passed - agent correctly implements causal consistency" \
+        "$RESPONSE_HASH" \
+        "$VLC_TAG" \
+        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL 2>&1)
+    RESPONSE_RESULT=$?
+else
+    # On local, hide output as before
     $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
         "$REQUEST_HASH" \
         "$SCORE" \
@@ -926,35 +1537,42 @@ for i in {0..3}; do
         "$RESPONSE_HASH" \
         "$VLC_TAG" \
         --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+    RESPONSE_RESULT=$?
+fi
 
-    if [ $? -eq 0 ]; then
-        echo "      ✅ ${VALIDATOR_NAME}: Score ${SCORE}/100 recorded"
-        echo "         Address: ${VALIDATOR}"
-        echo "         Request: ${REQUEST_HASH:0:10}..."
+if [ $RESPONSE_RESULT -eq 0 ]; then
+    echo "      ✅ ${VALIDATOR_NAME}: Score ${SCORE}/100 recorded"
+    echo "         Address: ${VALIDATOR}"
+    echo "         Request: ${REQUEST_HASH:0:10}..."
 
-        # Wait for transaction to be mined and verify response was recorded
-        sleep 1
-        VERIFY_RESPONSE=$($CAST_PATH call $VALIDATION_ADDRESS \
-            "getValidationStatus(bytes32)" \
-            "$REQUEST_HASH" \
-            --rpc-url $RPC_URL 2>&1 | tail -1)
+    # Wait for transaction to be mined and verify response was recorded
+    sleep 1
+    VERIFY_RESPONSE=$($CAST_PATH call $VALIDATION_ADDRESS \
+        "getValidationStatus(bytes32)" \
+        "$REQUEST_HASH" \
+        --rpc-url $RPC_URL 2>&1 | tail -1)
 
-        # Parse the response to check if score was recorded (response should be 100)
-        if [[ "$VERIFY_RESPONSE" == *"100"* ]]; then
-            echo "         ✓ Response confirmed on-chain"
-        fi
-    else
-        echo "      ⚠️  ${VALIDATOR_NAME}: Failed to record score"
+    # Parse the response to check if score was recorded (response should be 100)
+    if [[ "$VERIFY_RESPONSE" == *"100"* ]]; then
+        echo "         ✓ Response confirmed on-chain"
     fi
-done
+else
+    echo "      ⚠️  ${VALIDATOR_NAME}: Failed to record score"
+    if [ "$NETWORK" == "sepolia" ]; then
+        echo "      Error details: $RESPONSE_OUTPUT"
+    fi
+    echo "❌ Validation submission failed - cannot proceed"
+    cleanup
+    exit 1
+fi
 
-# Wait a bit more to ensure all transactions are fully confirmed
+# Wait a bit more to ensure transaction is fully confirmed
 echo ""
-echo "   ⏳ Waiting for all validation responses to be confirmed..."
+echo "   ⏳ Waiting for validation response to be confirmed..."
 sleep 2
 
-# Verify all 4 responses are on-chain by checking agent validations count
-echo "   🔍 Verifying all validation responses are on-chain..."
+# Verify the validation response is on-chain
+echo "   🔍 Verifying validation response is on-chain..."
 AGENT_VALIDATIONS=$($CAST_PATH call $VALIDATION_ADDRESS \
     "getAgentValidations(uint256)(bytes32[])" \
     "$AGENT_ID_DEC" \
@@ -964,8 +1582,10 @@ AGENT_VALIDATIONS=$($CAST_PATH call $VALIDATION_ADDRESS \
 VALIDATION_COUNT=$(echo "$AGENT_VALIDATIONS" | grep -o "0x" | wc -l)
 echo "      Total validation requests for agent: $VALIDATION_COUNT"
 
-if [ "$VALIDATION_COUNT" -lt 4 ]; then
-    echo "      ⚠️  Warning: Expected 4 validations but found $VALIDATION_COUNT"
+# Note: In the simplified system, we only have 1 validator (validator-1)
+# This is by design for demonstration purposes
+if [ "$VALIDATION_COUNT" -eq 0 ]; then
+    echo "      ⚠️  Warning: No validations found yet"
     echo "      Waiting 3 more seconds for blockchain to sync..."
     sleep 3
 fi
@@ -996,8 +1616,8 @@ echo "      📝 Raw getSummary response: $SUMMARY"
 # Debug output to see what we get
 if [[ "$SUMMARY" == *"Error"* ]] || [ -z "$SUMMARY" ]; then
     echo "      ⚠️  Error or empty response from getSummary"
-    # Fallback to expected values since all validators score 100
-    TOTAL_VALIDATIONS=4
+    # Fallback to expected values since validator scores 100
+    TOTAL_VALIDATIONS=1
     AVG_SCORE=100
 else
     # Cast returns values as plain numbers separated by newline or space
@@ -1031,37 +1651,119 @@ echo "      Average Score: ${AVG_SCORE}/100"
 
 if [ $AVG_SCORE -ge 70 ]; then
     echo "      Status: ✅ PASSED"
+    echo ""
+    echo "✅ Validation confirmed on-chain - proceeding with subnet registration"
 else
     echo "      Status: ❌ FAILED"
-fi
-
-echo ""
-
-# Step 2: Register subnet on blockchain (ValidationRegistry check enforced in smart contract)
-echo "🔐 Registering subnet with Agent ID $AGENT_ID_DEC..."
-echo "   The SubnetRegistry contract will verify:"
-echo "   ✓ Agent owns the identity token"
-echo "   ✓ Agent has passed VLC validation (score >= 70)"
-echo ""
-echo "   Subnet: $SUBNET_ID"
-echo "   Miner: $MINER"
-echo "   Validators: [$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]"
-echo ""
-
-$CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
-    "$SUBNET_ID" \
-    "$AGENT_ID_DEC" \
-    "$MINER" \
-    "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
-    --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
-    echo "✅ Subnet registered successfully on blockchain"
-else
-    echo "❌ Subnet registration failed"
+    echo ""
+    echo "❌ Validation failed (Score: $AVG_SCORE/100, Required: ≥70) - terminating"
     cleanup
     exit 1
 fi
+
+echo ""
+
+# Step 2: Approve HETU token transfers for subnet registration
+echo "💰 Approving HETU token deposits for subnet registration..."
+echo "   Miner deposit: 500 HETU"
+echo "   Validator deposits: 100 HETU each (4 validators = 400 HETU total)"
+echo ""
+
+# Approve miner deposit (500 HETU)
+MINER_DEPOSIT=$($CAST_PATH --to-wei 500)
+echo "   📤 Miner approving 500 HETU to SubnetRegistry..."
+$CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $MINER_DEPOSIT \
+    --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "      ✅ Miner approval successful"
+else
+    echo "      ❌ Miner approval failed"
+    cleanup
+    exit 1
+fi
+
+# Approve validator deposits (100 HETU each)
+VALIDATOR_DEPOSIT=$($CAST_PATH --to-wei 100)
+for i in 1 2 3 4; do
+    VALIDATOR_KEY_VAR="VALIDATOR${i}_KEY"
+    VALIDATOR_KEY="${!VALIDATOR_KEY_VAR}"
+
+    echo "   📤 Validator-${i} approving 100 HETU to SubnetRegistry..."
+    $CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $VALIDATOR_DEPOSIT \
+        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "      ✅ Validator-${i} approval successful"
+    else
+        echo "      ❌ Validator-${i} approval failed"
+        cleanup
+        exit 1
+    fi
+done
+
+echo ""
+
+# Step 3: Check if miner is already registered in a subnet
+echo "🔍 Checking if miner is already registered in a subnet..."
+EXISTING_SUBNET=$($CAST_PATH call $REGISTRY_ADDRESS "participantToSubnet(address)(string)" "$MINER" --rpc-url $RPC_URL 2>/dev/null | tr -d '"')
+
+if [ -n "$EXISTING_SUBNET" ] && [ "$EXISTING_SUBNET" != "" ]; then
+    echo "   ✅ Miner is already registered in subnet: '$EXISTING_SUBNET'"
+    echo "   Skipping subnet registration..."
+    echo ""
+    SUBNET_ID="$EXISTING_SUBNET"  # Use existing subnet ID
+else
+    echo "   Miner not yet registered in any subnet, proceeding with registration..."
+    echo ""
+
+    # Step 4: Register subnet on blockchain (ValidationRegistry check enforced in smart contract)
+    echo "🔐 Registering subnet with Agent ID $AGENT_ID_DEC..."
+    echo "   The SubnetRegistry contract will verify:"
+    echo "   ✓ Agent owns the identity token"
+    echo "   ✓ Agent has passed VLC validation (score >= 70)"
+    echo ""
+    echo "   Subnet: $SUBNET_ID"
+    echo "   Miner: $MINER"
+    echo "   Validators: [$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]"
+    echo ""
+
+    if [ "$NETWORK" == "sepolia" ]; then
+    # On Sepolia, capture output to show errors
+    REGISTER_OUTPUT=$($CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
+        "$SUBNET_ID" \
+        "$AGENT_ID_DEC" \
+        "$MINER" \
+        "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
+    REGISTER_RESULT=$?
+
+    if [ $REGISTER_RESULT -eq 0 ]; then
+        echo "✅ Subnet registered successfully on blockchain"
+    else
+        echo "❌ Subnet registration failed"
+        echo "   Error details: $REGISTER_OUTPUT"
+        cleanup
+        exit 1
+    fi
+else
+    # On local, hide output as before
+    $CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
+        "$SUBNET_ID" \
+        "$AGENT_ID_DEC" \
+        "$MINER" \
+        "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "✅ Subnet registered successfully on blockchain"
+    else
+        echo "❌ Subnet registration failed"
+        cleanup
+        exit 1
+    fi
+    fi  # End of network-specific registration
+fi  # End of subnet already registered check
 
 echo ""
 echo "🚀 Starting full subnet demo with per-epoch submission..."
@@ -1075,7 +1777,8 @@ echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
 echo ""
 
 # Step 3: Run the full per-epoch subnet demo
-timeout 120 go run main.go || true
+# Increased timeout for Sepolia (slow block times: ~15-30s per tx, 7 tasks = ~3-5 minutes)
+timeout 400 go run main.go || true
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1087,56 +1790,56 @@ echo ""
 echo "💰 Final FLUX Token Balances (After Mining)"
 echo "────────────────────────────────────────────────"
 echo "📊 Miner ($MINER):"
-MINER_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL)
+MINER_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL | awk '{print $1}')
 MINER_FINAL_FORMATTED=$(format_flux_balance $MINER_FINAL)
-MINER_GAINED=$(echo "$MINER_FINAL_FORMATTED - $MINER_INITIAL_FORMATTED" | bc -l)
+MINER_GAINED=$(echo "scale=6; ${MINER_FINAL_FORMATTED:-0} - ${MINER_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "   Balance: $MINER_FINAL_FORMATTED FLUX (+$MINER_GAINED FLUX mined)"
 
 echo "📊 Validator-1 ($VALIDATOR1):"
-V1_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL)
+V1_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL | awk '{print $1}')
 V1_FINAL_FORMATTED=$(format_flux_balance $V1_FINAL)
-V1_GAINED=$(echo "$V1_FINAL_FORMATTED - $V1_INITIAL_FORMATTED" | bc -l)
+V1_GAINED=$(echo "scale=6; ${V1_FINAL_FORMATTED:-0} - ${V1_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "   Balance: $V1_FINAL_FORMATTED FLUX (+$V1_GAINED FLUX mined)"
 
 echo "📊 Validator-2 ($VALIDATOR2):"
-V2_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR2 --rpc-url $RPC_URL)
+V2_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR2 --rpc-url $RPC_URL | awk '{print $1}')
 V2_FINAL_FORMATTED=$(format_flux_balance $V2_FINAL)
-V2_GAINED=$(echo "$V2_FINAL_FORMATTED - $V2_INITIAL_FORMATTED" | bc -l)
+V2_GAINED=$(echo "scale=6; ${V2_FINAL_FORMATTED:-0} - ${V2_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "   Balance: $V2_FINAL_FORMATTED FLUX (+$V2_GAINED FLUX mined)"
 
 echo "📊 Validator-3 ($VALIDATOR3):"
-V3_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR3 --rpc-url $RPC_URL)
+V3_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR3 --rpc-url $RPC_URL | awk '{print $1}')
 V3_FINAL_FORMATTED=$(format_flux_balance $V3_FINAL)
-V3_GAINED=$(echo "$V3_FINAL_FORMATTED - $V3_INITIAL_FORMATTED" | bc -l)
+V3_GAINED=$(echo "scale=6; ${V3_FINAL_FORMATTED:-0} - ${V3_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "   Balance: $V3_FINAL_FORMATTED FLUX (+$V3_GAINED FLUX mined)"
 
 echo "📊 Validator-4 ($VALIDATOR4):"
-V4_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR4 --rpc-url $RPC_URL)
+V4_FINAL=$($CAST_PATH call $FLUX_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR4 --rpc-url $RPC_URL | awk '{print $1}')
 V4_FINAL_FORMATTED=$(format_flux_balance $V4_FINAL)
-V4_GAINED=$(echo "$V4_FINAL_FORMATTED - $V4_INITIAL_FORMATTED" | bc -l)
+V4_GAINED=$(echo "scale=6; ${V4_FINAL_FORMATTED:-0} - ${V4_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "   Balance: $V4_FINAL_FORMATTED FLUX (+$V4_GAINED FLUX mined)"
 
-TOTAL_SUPPLY_FINAL=$($CAST_PATH call $FLUX_ADDRESS "totalSupply()(uint256)" --rpc-url $RPC_URL)
+TOTAL_SUPPLY_FINAL=$($CAST_PATH call $FLUX_ADDRESS "totalSupply()(uint256)" --rpc-url $RPC_URL | awk '{print $1}')
 TOTAL_SUPPLY_FINAL_FORMATTED=$(format_flux_balance $TOTAL_SUPPLY_FINAL)
-TOTAL_MINED=$(echo "$TOTAL_SUPPLY_FINAL_FORMATTED - $TOTAL_SUPPLY_INITIAL_FORMATTED" | bc -l)
+TOTAL_MINED=$(echo "scale=6; ${TOTAL_SUPPLY_FINAL_FORMATTED:-0} - ${TOTAL_SUPPLY_INITIAL_FORMATTED:-0}" | bc -l 2>/dev/null || echo "0")
 echo "📊 Total Supply: $TOTAL_SUPPLY_FINAL_FORMATTED FLUX (+$TOTAL_MINED FLUX total mined)"
 
 echo ""
 echo "💵 Final $PAYMENT_TOKEN Token Balances (x402 Payment System)"
 echo "────────────────────────────────────────────────"
 echo "📊 Client ($CLIENT):"
-CLIENT_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL)
-CLIENT_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $CLIENT_PAYMENT_FINAL)
+CLIENT_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $CLIENT --rpc-url $RPC_URL | awk '{print $1}')
+CLIENT_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $CLIENT_PAYMENT_FINAL 6)
 echo "   Balance: $CLIENT_PAYMENT_FINAL_FORMATTED $PAYMENT_TOKEN"
 
 echo "📊 Miner/Agent ($MINER):"
-MINER_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL)
-MINER_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $MINER_PAYMENT_FINAL)
+MINER_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL | awk '{print $1}')
+MINER_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $MINER_PAYMENT_FINAL 6)
 echo "   Balance: $MINER_PAYMENT_FINAL_FORMATTED $PAYMENT_TOKEN"
 
 echo "📊 V1 Coordinator ($VALIDATOR1):"
-V1_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL)
-V1_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $V1_PAYMENT_FINAL)
+V1_PAYMENT_FINAL=$($CAST_PATH call $PAYMENT_TOKEN_ADDRESS "balanceOf(address)(uint256)" $VALIDATOR1 --rpc-url $RPC_URL | awk '{print $1}')
+V1_PAYMENT_FINAL_FORMATTED=$(format_flux_balance $V1_PAYMENT_FINAL 6)
 echo "   Balance: $V1_PAYMENT_FINAL_FORMATTED $PAYMENT_TOKEN"
 
 echo ""
@@ -1226,10 +1929,12 @@ echo "Press Ctrl+C to cleanup and exit..."
 if [ "$NO_LOOP" != "true" ]; then
     while true; do
         sleep 10
-        # Check if Anvil is still running
-        if ! kill -0 $(cat anvil-per-epoch.pid) 2>/dev/null; then
-            echo "❌ Anvil stopped unexpectedly"
-            break
+        # Check if Anvil is still running (only for local network)
+        if [ "$NETWORK" == "local" ] && [ -f anvil-per-epoch.pid ]; then
+            if ! kill -0 $(cat anvil-per-epoch.pid) 2>/dev/null; then
+                echo "❌ Anvil stopped unexpectedly"
+                break
+            fi
         fi
     done
 else
