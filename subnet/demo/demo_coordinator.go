@@ -522,7 +522,7 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 
 // validateVLCSequenceFromMiner validates miner's VLC sequence across all validators
 func (dc *DemoCoordinator) validateVLCSequenceFromMiner(minerResponse *subnet.MinerResponseMessage) {
-	fmt.Printf("Validators validating Miner VLC sequence (local verification)...\n")
+	fmt.Printf("🔗🔐 Validators validating Miner/Agent VLC sequence (local verification)...\n")
 
 	// Each validator independently validates miner's VLC sequence
 	// Only Validator-1 maintains VLC state, others just validate the sequence
@@ -579,7 +579,7 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 	}
 
 	// Step 4: All validators vote on output quality (distributed consensus)
-	fmt.Printf("Validators performing quality assessment voting (distributed consensus)...\n")
+	fmt.Printf("🧠 Validators performing Semantic Alignment & quality assessment voting (distributed consensus)...\n")
 	votes := make([]*subnet.ValidatorVoteMessage, 0, len(dc.Validators))
 
 	// Each validator performs quality assessment and voting
