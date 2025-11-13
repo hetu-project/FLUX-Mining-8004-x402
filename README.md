@@ -42,6 +42,26 @@ sudo ./run-flux-mining.sh --payment-mode direct
 # Access blockchain inspector at http://localhost:3000/pocw-inspector.html
 ```
 
+### IPFS Storage (Optional - Recommended for Production)
+Enable IPFS storage to reduce on-chain costs by ~95%:
+
+```bash
+# 1. Copy the example file and add YOUR OWN credentials
+cp .env.pinata.example .env.pinata
+nano .env.pinata
+
+# Get credentials from: https://app.pinata.cloud/developers/api-keys
+
+# 2. Run normally - IPFS will be used automatically
+sudo ./run-flux-mining.sh
+```
+
+**⚠️ IPFS Privacy Note**:
+- `PINATA_PUBLIC="true"` = files accessible via any IPFS gateway
+- `PINATA_PUBLIC="false"` = private storage, NOT on public IPFS network
+
+See [IPFS Storage Guide](docs/ipfs-storage.md) for details.
+
 ## 🎯 What is FLUX Mining?
 
 FLUX Mining enables **Intelligence Money** through permissionless agentic coordination that evolves into a contextual causal knowledge graph. As AI agents collaborate and solve tasks, their interactions form a verifiable graph of causal dependencies. Agents that consistently generate quality outputs - as verified through this knowledge graph - are awarded FLUX tokens representing their demonstrated intelligence.
@@ -137,6 +157,7 @@ Client → Sign Transaction → Send to Facilitator → Agent Processes Task
 - **[Complete Documentation Index](docs/README.md)**
 - **[Architecture Deep Dive](docs/architecture.md)** - System design and components
 - **[VLC Protocol Guide](docs/vlc-validation.md)** - Vector Logical Clock consensus
+- **[IPFS Storage Guide](docs/ipfs-storage.md)** - Pinata IPFS integration for VLC data (95% cost reduction)
 - **[Development Guide](docs/development.md)** - Building and contributing
 - **[API Reference](docs/api.md)** - HTTP bridge and contract interfaces
 
@@ -145,12 +166,15 @@ Client → Sign Transaction → Send to Facilitator → Agent Processes Task
 ### Environment Files
 - `.env.local` - Anvil local blockchain settings
 - `.env.sepolia` - Ethereum-Sepolia testnet settings
+- `.env.pinata` - Pinata IPFS configuration (optional - enables 95% cost reduction)
 
 ### Key Parameters
 ```bash
 PAYMENT_MODE=escrow|direct    # Payment processing mode
 NETWORK=local|sepolia         # Blockchain network
 RPC_URL=<your-rpc-endpoint>   # Ethereum RPC endpoint
+USE_PINATA=true|false         # Enable IPFS storage (see Quick Start section)
+PINATA_PUBLIC=true|false      # Public (any gateway) or private (your gateway only)
 ```
 
 ## 🔗 Integrations & Support

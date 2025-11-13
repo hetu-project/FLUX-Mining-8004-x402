@@ -155,6 +155,30 @@ else
     echo ""
 fi
 
+# Load Pinata IPFS configuration (optional - for VLC data storage)
+if [ -f .env.pinata ]; then
+    echo "📌 Loading Pinata IPFS configuration..."
+    source .env.pinata
+    export USE_PINATA
+    export PINATA_PUBLIC
+    export JWT_SECRET_ACCESS
+    export GATEWAY_PINATA
+    if [ "$USE_PINATA" = "true" ]; then
+        echo "   ✅ Pinata IPFS enabled for VLC graph storage"
+        if [ "$PINATA_PUBLIC" = "false" ]; then
+            echo "   🔒 Access mode: PRIVATE (gateway-controlled)"
+        else
+            echo "   🔓 Access mode: PUBLIC (any IPFS gateway)"
+        fi
+    else
+        echo "   ⚪ Pinata IPFS disabled (using traditional on-chain storage)"
+    fi
+else
+    echo "⚪ No Pinata configuration found (.env.pinata missing)"
+    echo "   Using traditional on-chain VLC data storage"
+fi
+echo ""
+
 # Determine correct forge/cast paths early (needed for both networks)
 if [ -n "$SUDO_USER" ]; then
     USER_HOME=$(eval echo ~$SUDO_USER)
@@ -1338,7 +1362,7 @@ fi
 
 # Initialize the Node.js bridge with HTTP server
 echo "🌐 Initializing Per-Epoch Mainnet Bridge with HTTP server..."
-node -e "
+NODE_NO_WARNINGS=1 node --no-deprecation -e "
 const PerEpochBridge = require('./mainnet-bridge-per-epoch.js');
 const bridge = new PerEpochBridge();
 
@@ -1850,14 +1874,14 @@ echo "╚═══════════════════════�
 echo ""
 
 # Read agent reputation from ReputationRegistry contract
-AGENT_ID="0"
-echo "📊 Agent ID $AGENT_ID Reputation on Blockchain:"
+# Use AGENT_ID_DEC which was set during registration/verification
+echo "📊 Agent ID $AGENT_ID_DEC Reputation on Blockchain:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Call getSummary(uint256, address[], bytes32, bytes32) returns (uint64, uint8)
 # Parameters: agentId, clientAddresses (empty array), tag1 (0x0), tag2 (0x0)
 REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],bytes32,bytes32)(uint64,uint8)" \
-    $AGENT_ID "[]" "0x0000000000000000000000000000000000000000000000000000000000000000" "0x0000000000000000000000000000000000000000000000000000000000000000" \
+    $AGENT_ID_DEC "[]" "0x0000000000000000000000000000000000000000000000000000000000000000" "0x0000000000000000000000000000000000000000000000000000000000000000" \
     --rpc-url $RPC_URL 2>&1)
 
 if echo "$REPUTATION_DATA" | grep -q "^[0-9]"; then

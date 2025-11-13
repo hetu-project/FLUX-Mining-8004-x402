@@ -19,6 +19,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const http = require('http');
 const url = require('url');
+const FormData = require('form-data');
+const fetch = require('node-fetch');
 
 class PerEpochMainnetBridge {
     constructor() {
@@ -32,6 +34,13 @@ class PerEpochMainnetBridge {
         // Network configuration - use environment variable or default to localhost
         this.RPC_URL = process.env.RPC_URL || "http://localhost:8545";
         this.DGRAPH_URL = "http://localhost:8080";
+
+        // Pinata IPFS configuration
+        this.USE_PINATA = process.env.USE_PINATA === "true";
+        this.PINATA_PUBLIC = process.env.PINATA_PUBLIC !== "false"; // Default to public
+        this.PINATA_JWT = process.env.JWT_SECRET_ACCESS;
+        this.PINATA_GATEWAY = process.env.GATEWAY_PINATA || "coffee-defiant-raccoon-829.mypinata.cloud";
+        this.PINATA_API_URL = "https://uploads.pinata.cloud/v3/files";
 
         // Account configuration - use environment variables or defaults for local Anvil
         this.accounts = {
@@ -70,6 +79,107 @@ class PerEpochMainnetBridge {
         console.log("✅ Bridge initialized successfully!");
         console.log(`📍 Validator-1: ${this.accounts.validator1.address}`);
         console.log(`⛏️  Miner: ${this.accounts.miner.address}`);
+
+        // Log IPFS configuration
+        if (this.USE_PINATA) {
+            console.log(`📌 Pinata IPFS: ENABLED`);
+            console.log(`🌐 Gateway: https://${this.PINATA_GATEWAY}/ipfs/`);
+            console.log(`🔓 Access Mode: ${this.PINATA_PUBLIC ? 'PUBLIC' : 'PRIVATE'}`);
+        } else {
+            console.log(`📌 Pinata IPFS: DISABLED (storing full data on-chain)`);
+        }
+    }
+
+    /**
+     * Upload VLC graph data to Pinata IPFS
+     * @param {Object} vlcGraphData - The VLC graph data to upload
+     * @param {number} epochNumber - Epoch number for naming
+     * @returns {Promise<{cid: string, ipfsUri: string, gatewayUrl: string}>}
+     */
+    async uploadToPinata(vlcGraphData, epochNumber) {
+        try {
+            console.log(`📤 Uploading Epoch ${epochNumber} data to Pinata IPFS...`);
+
+            if (!this.PINATA_JWT) {
+                throw new Error('PINATA_JWT not configured. Please set JWT_SECRET_ACCESS in environment.');
+            }
+
+            // Convert VLC graph data to JSON string
+            const jsonContent = JSON.stringify(vlcGraphData, null, 2);
+            const jsonBuffer = Buffer.from(jsonContent, 'utf-8');
+
+            // Create form data with file
+            const FormData = require('form-data');
+            const formData = new FormData();
+            formData.append('file', jsonBuffer, {
+                filename: `epoch-${epochNumber}-vlc-graph.json`,
+                contentType: 'application/json'
+            });
+
+            // Add metadata
+            const metadata = JSON.stringify({
+                name: `Epoch ${epochNumber} VLC Graph`,
+                keyvalues: {
+                    epochNumber: epochNumber.toString(),
+                    subnetId: vlcGraphData.subnetId || 'subnet-1',
+                    timestamp: vlcGraphData.timestamp?.toString() || Date.now().toString(),
+                    type: 'vlc-graph-data'
+                }
+            });
+            formData.append('pinataMetadata', metadata);
+
+            // Add network parameter to control public/private access
+            // "public" = accessible via any IPFS gateway
+            // omitted or "private" = only accessible via authenticated Pinata gateway
+            if (this.PINATA_PUBLIC) {
+                formData.append('network', 'public');
+            }
+            // If PINATA_PUBLIC is false, don't add network parameter (defaults to private)
+
+            // Upload to Pinata v3 Files API
+            const response = await fetch(this.PINATA_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.PINATA_JWT}`,
+                    ...formData.getHeaders()
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Pinata upload failed: ${response.status} ${errorText}`);
+            }
+
+            const result = await response.json();
+            const cid = result.data.cid;
+            const ipfsUri = `ipfs://${cid}`;
+            const gatewayUrl = `https://${this.PINATA_GATEWAY}/ipfs/${cid}`;
+            const jsonSize = jsonContent.length;
+
+            console.log(`✅ Uploaded to Pinata v3 Files API successfully!`);
+            console.log(`   CID: ${cid}`);
+            console.log(`   IPFS URI: ${ipfsUri}`);
+            console.log(`   Gateway URL: ${gatewayUrl}`);
+
+            // v3 Files API with network parameter provides TRUE private/public distinction
+            if (this.PINATA_PUBLIC) {
+                console.log(`   🔓 PUBLIC: https://ipfs.io/ipfs/${cid}`);
+            } else {
+                console.log(`   🔒 PRIVATE: NOT on public IPFS (ERR_ID:00006 is expected)`);
+            }
+
+            return {
+                cid,
+                ipfsUri,
+                gatewayUrl,
+                size: jsonSize
+            };
+
+        } catch (error) {
+            console.error(`❌ Failed to upload to Pinata: ${error.message}`);
+            throw error;
+        }
     }
 
     async loadContracts() {
@@ -537,9 +647,6 @@ class PerEpochMainnetBridge {
         try {
             console.log(`📤 Submitting Epoch ${epochData.epochNumber} to blockchain...`);
 
-            // Convert Go epoch data to blockchain format
-            const vlcGraphData = this.encodeVLCGraphData(epochData);
-
             const successfulMiners = [this.accounts.miner.address];
 
             // Use actual successful/failed counts from detailed round data
@@ -555,6 +662,25 @@ class PerEpochMainnetBridge {
                 // Fallback to legacy method if detailed rounds are unavailable
                 successfulTasks = epochData.completedRounds ? epochData.completedRounds.length : 0;
                 failedTasks = 0;
+            }
+
+            // Prepare VLC graph data
+            let vlcGraphData;
+            let ipfsMetadata = null;
+
+            if (this.USE_PINATA) {
+                // Upload to IPFS and use URI
+                console.log(`📌 Pinata mode: Uploading VLC data to IPFS...`);
+                const vlcGraph = this.createVLCGraphObject(epochData);
+                const ipfsResult = await this.uploadToPinata(vlcGraph, epochData.epochNumber);
+
+                // Store IPFS URI as bytes (much smaller than full JSON)
+                vlcGraphData = ethers.toUtf8Bytes(ipfsResult.ipfsUri);
+                ipfsMetadata = ipfsResult;
+            } else {
+                // Traditional mode: encode full JSON as bytes
+                console.log(`📦 Traditional mode: Encoding full VLC data on-chain...`);
+                vlcGraphData = this.encodeVLCGraphData(epochData);
             }
 
             // Submit to contract
@@ -578,10 +704,20 @@ class PerEpochMainnetBridge {
                 txHash: tx.hash,
                 blockNumber: receipt.blockNumber,
                 timestamp: epochData.timestamp,
-                fluxMined: "0" // Would calculate from logs
+                fluxMined: "0", // Would calculate from logs
+                ipfsUri: ipfsMetadata?.ipfsUri || null,
+                ipfsCid: ipfsMetadata?.cid || null,
+                gatewayUrl: ipfsMetadata?.gatewayUrl || null
             });
 
             console.log(`🎉 Epoch ${epochData.epochNumber} submitted successfully!`);
+            if (ipfsMetadata) {
+                if (this.PINATA_PUBLIC) {
+                    console.log(`📌 IPFS: https://ipfs.io/ipfs/${ipfsMetadata.cid}`);
+                } else {
+                    console.log(`🔒 Private storage - NOT accessible via public IPFS`);
+                }
+            }
             console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
             return {
@@ -596,19 +732,27 @@ class PerEpochMainnetBridge {
         }
     }
 
-    // Encode VLC graph data for blockchain submission
-    encodeVLCGraphData(epochData) {
-        // Create a structured representation of the VLC graph for this epoch
-        const vlcGraph = {
+    /**
+     * Create VLC graph object from epoch data (used for both IPFS and on-chain storage)
+     * @param {Object} epochData - Epoch data from Go subnet
+     * @returns {Object} Structured VLC graph data
+     */
+    createVLCGraphObject(epochData) {
+        return {
             epochNumber: epochData.epochNumber,
+            subnetId: epochData.subnetId,
             vlcClockState: epochData.vlcClockState,
-            detailedRounds: epochData.detailedRounds || [],  // Include detailed round data
+            detailedRounds: epochData.detailedRounds || [],
             epochEventId: epochData.epochEventId || '',
             parentRoundEventId: epochData.parentRoundEventId || '',
-            timestamp: Math.floor(Date.now() / 1000)
-            // Removed redundant fields: completedRounds, totalRounds, successfulRounds, failedRounds
-            // These are now calculated and passed separately to smart contract
+            timestamp: epochData.timestamp || Math.floor(Date.now() / 1000)
         };
+    }
+
+    // Encode VLC graph data for blockchain submission (traditional mode - full data on-chain)
+    encodeVLCGraphData(epochData) {
+        // Create a structured representation of the VLC graph for this epoch
+        const vlcGraph = this.createVLCGraphObject(epochData);
 
         // Convert to hex-encoded bytes for smart contract
         const jsonString = JSON.stringify(vlcGraph);
