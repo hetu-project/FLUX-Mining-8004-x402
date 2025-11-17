@@ -194,7 +194,7 @@ func (pc *PaymentCoordinator) GeneratePaymentRequest(taskID string, agentAddr co
 		},
 		Agent: AgentInfo{
 			Address: agentAddr.Hex(),
-			AgentID: "0", // ERC-8004 registered agent ID
+			AgentID: os.Getenv("AGENT_ID_DEC"), // ERC-8004 registered agent ID from environment
 		},
 		RequiresPayment: true,
 	}

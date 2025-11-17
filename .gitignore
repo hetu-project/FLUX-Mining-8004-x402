@@ -6,6 +6,7 @@
 *.dylib
 main
 serve-dashboard
+flux-mining
 
 # Go build artifacts
 *.test
@@ -47,6 +48,8 @@ contract_addresses.json
 .env.test.local
 .env.production.local
 .env.pinata
+.env.eigen
+.env.phala
 
 # Coverage reports
 *.cover
@@ -130,8 +133,9 @@ dgraph-data/
 # Sepolia agent ID cache
 .sepolia_agent_id_*
 
-# Old documentation
+# Old documentation and guides
 README_detailed.md
+TEE-DEPLOYMENT-GUIDE.md
 
 # Foundry deployment artifacts
 broadcast/
@@ -139,6 +143,7 @@ broadcast/
 # Test and development scripts
 generate-keys.js
 generate-sepolia-keys.js
+RUN_TESTS.sh
 
 # Unused contracts and scripts
 ContractRegistry.sol

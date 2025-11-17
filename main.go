@@ -49,31 +49,51 @@ func waitForDgraph() error {
 
 // main demonstrates the per-epoch PoCW integration
 func main() {
+	// Check if running in agent server mode FIRST (before Dgraph initialization)
+	// This mode doesn't need Dgraph or any other dependencies
+	agentServerMode := os.Getenv("AGENT_SERVER_MODE") == "true"
+	if agentServerMode {
+		// Run agent as HTTP server for TEE validator to test
+		fmt.Println("🌐 Starting in Agent Server Mode (for TEE Validation)...")
+		RunAgentServerForTEEValidation()
+		// This blocks, so we never reach here
+		return
+	}
+
+	// Check if running in validation-only mode EARLY (before heavy initialization)
+	validationOnlyMode := os.Getenv("VALIDATION_ONLY_MODE") == "true"
+
 	// Check if running in subnet-only mode
 	subnetOnlyMode := os.Getenv("SUBNET_ONLY_MODE") == "true"
-	
-	if subnetOnlyMode {
-		fmt.Println("=== PoCW Subnet-Only Demo ===")
-		fmt.Println("Architecture: Pure subnet consensus with VLC visualization")
-		fmt.Println("")
-	} else {
-		fmt.Println("=== PoCW Per-Epoch Mainnet Integration Demo ===")
-		fmt.Println("Architecture: Real-time epoch submission (every 3 rounds)")
-		fmt.Println("")
+
+	// Only show banner if NOT in validation-only mode
+	if !validationOnlyMode {
+		if subnetOnlyMode {
+			fmt.Println("=== PoCW Subnet-Only Demo ===")
+			fmt.Println("Architecture: Pure subnet consensus with VLC visualization")
+			fmt.Println("")
+		} else {
+			fmt.Println("=== PoCW Per-Epoch Mainnet Integration Demo ===")
+			fmt.Println("Architecture: Real-time epoch submission (every 3 rounds)")
+			fmt.Println("")
+		}
 	}
 
 	// Bridge is started by the bash script, so we don't need to start it here
 	// The Go code will communicate with the bridge via HTTP on port 3001
 
-	// Try to initialize Dgraph gracefully
-	fmt.Println("Waiting for Dgraph to be ready...")
-	if err := waitForDgraph(); err != nil {
-		fmt.Printf("Dgraph not available: %v\n", err)
-		fmt.Println("Running demo without graph visualization...")
-	} else {
-		fmt.Println("Initializing Dgraph connection...")
-		dgraph.InitDgraph("localhost:9080")
-		fmt.Println("Dgraph initialized successfully!")
+	// Skip Dgraph initialization if in validation-only mode
+	if !validationOnlyMode {
+		// Try to initialize Dgraph gracefully
+		fmt.Println("Waiting for Dgraph to be ready...")
+		if err := waitForDgraph(); err != nil {
+			fmt.Printf("Dgraph not available: %v\n", err)
+			fmt.Println("Running demo without graph visualization...")
+		} else {
+			fmt.Println("Initializing Dgraph connection...")
+			dgraph.InitDgraph("localhost:9080")
+			fmt.Println("Dgraph initialized successfully!")
+		}
 	}
 
 	// Create demo coordinator with per-epoch callback integration
@@ -83,14 +103,14 @@ func main() {
 		subnetID = "subnet-1" // Default to the registered subnet
 	}
 	coordinator := demo.NewDemoCoordinator(subnetID)
-	
+
 	// Set up HTTP bridge URL only if not in subnet-only mode
 	if !subnetOnlyMode && coordinator.GraphAdapter != nil {
 		fmt.Println("🔗 Setting up per-epoch HTTP bridge integration...")
-		
+
 		// Set the bridge URL for HTTP communication
 		coordinator.GraphAdapter.SetBridgeURL("http://localhost:3001")
-		
+
 		fmt.Println("✅ Per-epoch HTTP bridge configured successfully")
 		fmt.Println("📡 Graph adapter will send HTTP requests to JavaScript bridge")
 	} else if subnetOnlyMode {
@@ -99,9 +119,7 @@ func main() {
 		fmt.Println("⚠️  GraphAdapter not available - running standard demo")
 	}
 
-
-	// Check if running in validation-only mode
-	validationOnlyMode := os.Getenv("VALIDATION_ONLY_MODE") == "true"
+	// validationOnlyMode already declared at the top
 	if validationOnlyMode {
 		// Run VLC validation ONLY when in validation mode
 		fmt.Println("🔐 Running VLC Protocol Validation...")

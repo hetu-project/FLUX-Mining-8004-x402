@@ -15,7 +15,7 @@ echo ""
 # Parse command line arguments
 PAYMENT_TOKEN="USDC"  # Default to USDC
 NETWORK="local"       # Default to local Anvil
-PAYMENT_MODE="escrow" # Default to escrow mode
+PAYMENT_MODE="direct" # Default to direct mode
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -176,6 +176,27 @@ if [ -f .env.pinata ]; then
 else
     echo "⚪ No Pinata configuration found (.env.pinata missing)"
     echo "   Using traditional on-chain VLC data storage"
+fi
+echo ""
+
+# Load EigenX TEE configuration (optional - for TEE-based VLC validation)
+if [ -f .env.eigen ]; then
+    echo "🔐 Loading EigenX TEE configuration..."
+    source .env.eigen
+    export USE_TEE_VALIDATION
+    export TEE_VALIDATOR_ENDPOINT
+    export TEE_NETWORK
+    if [ "$USE_TEE_VALIDATION" = "true" ]; then
+        echo "   ✅ TEE validation enabled (Hardware-guaranteed)"
+        echo "   🏢 TEE Endpoint: ${TEE_VALIDATOR_ENDPOINT}"
+        echo "   🌐 Network: ${TEE_NETWORK}"
+    else
+        echo "   ⚪ TEE validation disabled (using local validation)"
+    fi
+else
+    echo "⚪ No TEE configuration found (.env.eigen missing)"
+    echo "   Using local VLC validation"
+    export USE_TEE_VALIDATION="false"
 fi
 echo ""
 
@@ -916,6 +937,11 @@ echo ""
 echo "✅ ERC-8004 Registries Deployed Successfully"
 echo "────────────────────────────────────────────"
 
+# Set registry addresses for Go code (expected environment variable names)
+export IDENTITY_REGISTRY_ADDRESS="$IDENTITY_ADDRESS"
+export REPUTATION_REGISTRY_ADDRESS="$REPUTATION_ADDRESS"
+export VALIDATION_REGISTRY_ADDRESS="$VALIDATION_ADDRESS"
+
 # === Deploy Payment Token (USDC or AIUSD) for x402 Payments ===
 echo "💵 Deploying $PAYMENT_TOKEN Token (x402 payment stablecoin)..."
 
@@ -1410,8 +1436,243 @@ echo ""
 # Step 1: Run VLC Validation FIRST (before subnet registration)
 echo "🔐 Running VLC Protocol Validation..."
 echo ""
-VALIDATION_ONLY_MODE=true timeout 60 go run main.go
-VALIDATION_EXIT_CODE=$?
+
+# Agent validates itself (with TEE's help)
+# The validator address is the agent's own address
+VALIDATOR=$MINER_ADDRESS
+VALIDATOR_NAME="Agent/Miner (self-validation)"
+
+# Generate unique request hash
+REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
+REQUEST_HASH="0x${REQUEST_HASH}"
+
+# Submit validation REQUEST to blockchain FIRST (before validation happens)
+echo "📝 Step 1: Submitting validation request to ValidationRegistry..."
+echo "   📋 Validator: ${VALIDATOR_NAME} ($VALIDATOR)"
+echo "   🔑 Request Hash: $REQUEST_HASH"
+echo ""
+
+if [ "$NETWORK" == "sepolia" ]; then
+    # Submit validation request with --json flag for reliable parsing
+    VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
+        "$VALIDATOR" \
+        "$AGENT_ID_DEC" \
+        "VLC Protocol Validation Test" \
+        "$REQUEST_HASH" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
+    VALIDATION_RESULT=$?
+
+    if [ $VALIDATION_RESULT -ne 0 ]; then
+        echo "   ❌ Validation request failed"
+        echo "   Error: $VALIDATION_OUTPUT"
+        cleanup
+        exit 1
+    fi
+
+    # Extract transaction hash from JSON output (ensure only first match)
+    REQUEST_TX=$(echo "$VALIDATION_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+
+    echo "   ✅ Validation request submitted"
+    echo "   📝 Transaction: $REQUEST_TX"
+    echo "   🔗 View: https://sepolia.etherscan.io/tx/$REQUEST_TX"
+    echo "   📤 Submitted by: MINER ($MINER_ADDRESS)"
+else
+    # On local anvil network
+    VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
+        "$VALIDATOR" \
+        "$AGENT_ID_DEC" \
+        "VLC Protocol Validation Test" \
+        "$REQUEST_HASH" \
+        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
+    VALIDATION_RESULT=$?
+
+    if [ $VALIDATION_RESULT -ne 0 ]; then
+        echo "   ❌ Failed to create validation request"
+        cleanup
+        exit 1
+    fi
+
+    # Extract transaction hash from JSON output
+    REQUEST_TX=$(echo "$VALIDATION_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+
+    echo "   ✅ Validation request submitted (Local Anvil)"
+    echo "   📝 Transaction: $REQUEST_TX"
+    echo "   📤 Submitted by: MINER ($MINER_ADDRESS)"
+fi
+
+echo ""
+echo "📝 Step 2: Performing VLC validation..."
+echo ""
+
+# Check if TEE validation is enabled
+if [ "$USE_TEE_VALIDATION" = "true" ]; then
+    echo "🔐 Using TEE-based validation (Hardware-guaranteed)"
+    echo "   🏢 TEE Endpoint: ${TEE_VALIDATOR_ENDPOINT}"
+    echo ""
+
+    # Step 1: Start agent in HTTP server mode for TEE to test
+    AGENT_HTTP_PORT="${AGENT_HTTP_PORT:-8080}"
+    echo "   🌐 Starting agent HTTP server on port ${AGENT_HTTP_PORT}..."
+
+    # Kill any existing process on port 8080
+    lsof -ti:${AGENT_HTTP_PORT} | xargs kill -9 2>/dev/null || true
+    sleep 1
+
+    AGENT_SERVER_MODE=true AGENT_HTTP_PORT=$AGENT_HTTP_PORT go run main.go agent_http_server.go &
+    AGENT_SERVER_PID=$!
+
+    # Wait for agent server to be ready
+    echo "   ⏳ Waiting for agent HTTP server to start..."
+    for i in {1..30}; do
+        if curl -s http://localhost:${AGENT_HTTP_PORT}/health > /dev/null 2>&1; then
+            echo "   ✅ Agent HTTP server ready"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo "   ❌ Agent HTTP server failed to start"
+            kill $AGENT_SERVER_PID 2>/dev/null || true
+            cleanup
+            exit 1
+        fi
+        sleep 1
+    done
+    echo ""
+
+    # Step 2: Call TEE validator to test the agent
+    echo "   📤 Requesting TEE to validate agent..."
+    echo ""
+
+    # For remote TEE, we need to expose the agent
+    # Check if ngrok is available
+    if command -v ngrok &> /dev/null; then
+        echo "   🌐 Creating public tunnel for agent..."
+
+        # Try localtunnel first (simpler, no auth needed)
+        if command -v lt &> /dev/null; then
+            echo "   Using localtunnel..."
+            lt --port ${AGENT_HTTP_PORT} --print-requests > /tmp/localtunnel.log 2>&1 &
+            TUNNEL_PID=$!
+
+            # Wait for tunnel to be created and extract URL
+            sleep 5
+            AGENT_PUBLIC_URL=$(grep -o 'https://[^[:space:]]*\.loca\.lt' /tmp/localtunnel.log | head -1)
+            # Alternative pattern if first doesn't match
+            if [ -z "$AGENT_PUBLIC_URL" ]; then
+                AGENT_PUBLIC_URL=$(grep 'your url is:' /tmp/localtunnel.log | awk '{print $NF}')
+            fi
+
+            if [ -n "$AGENT_PUBLIC_URL" ]; then
+                echo "   ✅ Tunnel created: $AGENT_PUBLIC_URL"
+            fi
+        fi
+
+        # Fallback to ngrok if localtunnel fails
+        if [ -z "$AGENT_PUBLIC_URL" ] && command -v ngrok &> /dev/null; then
+            echo "   Trying ngrok as fallback..."
+            ngrok http ${AGENT_HTTP_PORT} --log=stdout > /tmp/ngrok.log 2>&1 &
+            TUNNEL_PID=$!
+            sleep 5
+
+            # Get ngrok URL
+            AGENT_PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"https://[^"]*' | cut -d'"' -f4 | head -1)
+        fi
+
+        if [ -z "$AGENT_PUBLIC_URL" ]; then
+            echo "   ⚠️  Failed to create tunnel, trying with localhost (TEE must be local)"
+            AGENT_PUBLIC_URL="http://localhost:${AGENT_HTTP_PORT}"
+        else
+            echo "   ✅ Agent accessible at: ${AGENT_PUBLIC_URL}"
+        fi
+    # Check if localtunnel is available
+    elif command -v lt &> /dev/null; then
+        echo "   🌐 Starting localtunnel for agent..."
+        lt --port ${AGENT_HTTP_PORT} --print-requests > /tmp/lt.log 2>&1 &
+        LT_PID=$!
+        sleep 5
+
+        # Get localtunnel URL from the log
+        AGENT_PUBLIC_URL=$(grep -o 'https://[^[:space:]]*' /tmp/lt.log | head -1)
+
+        if [ -z "$AGENT_PUBLIC_URL" ]; then
+            echo "   ⚠️  Failed to get localtunnel URL, trying with localhost"
+            AGENT_PUBLIC_URL="http://localhost:${AGENT_HTTP_PORT}"
+        else
+            echo "   ✅ Agent accessible at: ${AGENT_PUBLIC_URL}"
+        fi
+    else
+        echo "   ⚠️  No tunneling service found (ngrok/localtunnel), TEE must be running locally"
+        AGENT_PUBLIC_URL="http://localhost:${AGENT_HTTP_PORT}"
+    fi
+
+    TEE_RESPONSE=$(curl -s -X POST "${TEE_VALIDATOR_ENDPOINT}/validate-agent" \
+        -H "Content-Type: application/json" \
+        -d "{\"agentId\": \"${AGENT_ID_DEC}\", \"agentEndpoint\": \"${AGENT_PUBLIC_URL}\", \"requestHash\": \"${REQUEST_HASH}\"}" 2>&1)
+
+    # Check if TEE validation was successful
+    if echo "$TEE_RESPONSE" | grep -q '"success":true'; then
+        VALIDATION_EXIT_CODE=0
+        echo "   ✅ TEE validation completed"
+
+        # Extract details from TEE response
+        TEE_SCORE=$(echo "$TEE_RESPONSE" | grep -o '"score":[0-9]*' | cut -d':' -f2)
+        TEE_FEEDBACK=$(echo "$TEE_RESPONSE" | grep -o '"feedback":"[^"]*"' | cut -d':' -f2- | tr -d '"')
+        TEE_WALLET=$(echo "$TEE_RESPONSE" | grep -o '"wallet":"[^"]*"' | cut -d':' -f2- | tr -d '"')
+        TEE_SIGNATURE=$(echo "$TEE_RESPONSE" | grep -o '"teeSignature":"[^"]*"' | cut -d':' -f2- | tr -d '"')
+        TEE_REQUEST_HASH=$(echo "$TEE_RESPONSE" | grep -o '"requestHash":"[^"]*"' | cut -d':' -f2- | tr -d '"')
+        TEE_RESPONSE_HASH=$(echo "$TEE_RESPONSE" | grep -o '"responseHash":"[^"]*"' | cut -d':' -f2- | tr -d '"')
+
+        echo "   📊 Score: ${TEE_SCORE}/100"
+        echo "   💬 Feedback: ${TEE_FEEDBACK}"
+        echo "   🔐 TEE Wallet: ${TEE_WALLET}"
+        if [ -n "$TEE_SIGNATURE" ]; then
+            echo "   🔏 TEE Signature: ${TEE_SIGNATURE:0:20}...${TEE_SIGNATURE: -10}"
+        fi
+    else
+        VALIDATION_EXIT_CODE=1
+        echo "   ❌ TEE validation failed"
+        echo "   Response: $TEE_RESPONSE"
+    fi
+
+    # Stop agent HTTP server and ngrok
+    echo ""
+    echo "   🛑 Stopping agent HTTP server..."
+    kill $AGENT_SERVER_PID 2>/dev/null || true
+    echo "   ✅ Agent HTTP server stopped"
+
+    # Stop tunneling service if it was started
+    if [ ! -z "$TUNNEL_PID" ]; then
+        echo "   🛑 Stopping tunnel..."
+        kill $TUNNEL_PID 2>/dev/null || true
+        echo "   ✅ Tunnel stopped"
+    fi
+    if [ ! -z "$LT_PID" ]; then
+        echo "   🛑 Stopping localtunnel..."
+        kill $LT_PID 2>/dev/null || true
+        echo "   ✅ Localtunnel stopped"
+    fi
+    echo ""
+
+    if [ $VALIDATION_EXIT_CODE -eq 0 ]; then
+        echo "   ✅ TEE validation successful (Hardware-guaranteed)"
+    else
+        echo "   ❌ TEE validation failed"
+    fi
+else
+    # Local validation without TEE
+    echo "🔍 Using local validation (No TEE verification)"
+    echo "   Testing VLC protocol implementation..."
+    echo ""
+
+    VALIDATION_ONLY_MODE=true timeout 60 go run main.go agent_http_server.go
+    VALIDATION_EXIT_CODE=$?
+
+    echo ""
+    if [ $VALIDATION_EXIT_CODE -eq 0 ]; then
+        echo "   ✅ Local VLC validation successful"
+    else
+        echo "   ❌ Local VLC validation failed"
+    fi
+fi
 
 if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
     echo ""
@@ -1453,16 +1714,18 @@ if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
 
         RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
         RESPONSE_HASH="0x${RESPONSE_HASH}"
-        VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
-        VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
+        # VLC_TAG must be RIGHT-padded (text at beginning, zeros at end) to match contract
+        VLC_TAG_HEX=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 24)
+        VLC_TAG="0x${VLC_TAG_HEX}$(printf '0%.0s' {1..40})"
 
+        # Agent submits the validation response (even for failures)
         $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
             "$REQUEST_HASH" \
             "$SCORE" \
             "VLC validation failed - agent does not implement causal consistency correctly" \
             "$RESPONSE_HASH" \
             "$VLC_TAG" \
-            --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+            --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 
         if [ $? -eq 0 ]; then
             echo "   ⚠️  ${VALIDATOR_NAME}: Failure score ${SCORE}/100 recorded"
@@ -1483,91 +1746,98 @@ echo ""
 echo "✅ VLC Validation PASSED"
 echo ""
 
-# Step 1.5: Submit validation result from Validator-1 ONLY to ValidationRegistry
-echo "📝 Submitting VLC validation result to ValidationRegistry..."
-
-# Only use Validator-1 for validation
-VALIDATOR=$VALIDATOR1
-VALIDATOR_KEY=$VALIDATOR1_KEY
-VALIDATOR_NAME="Validator-1"
-
-# Generate unique request hash
-REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
-REQUEST_HASH="0x${REQUEST_HASH}"
-
+# Step 3: Submit validation RESPONSE to ValidationRegistry
+echo "📝 Step 3: Submitting validation response to ValidationRegistry..."
 echo ""
-echo "   📋 ${VALIDATOR_NAME} submitting validation..."
-
-# Submit validation request (miner creates request for validator to validate)
-if [ "$NETWORK" == "sepolia" ]; then
-    # On Sepolia, capture output to show errors
-    VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
-        "$VALIDATOR" \
-        "$AGENT_ID_DEC" \
-        "VLC Protocol Validation Test" \
-        "$REQUEST_HASH" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
-    VALIDATION_RESULT=$?
-
-    if [ $VALIDATION_RESULT -ne 0 ]; then
-        echo "      ⚠️  Failed to create validation request"
-        echo "      Error details: $VALIDATION_OUTPUT"
-        echo "❌ Validation submission failed - cannot proceed"
-        cleanup
-        exit 1
-    fi
-else
-    # On local, hide output as before
-    $CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
-        "$VALIDATOR" \
-        "$AGENT_ID_DEC" \
-        "VLC Protocol Validation Test" \
-        "$REQUEST_HASH" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
-
-    if [ $? -ne 0 ]; then
-        echo "      ⚠️  Failed to create validation request"
-        echo "❌ Validation submission failed - cannot proceed"
-        cleanup
-        exit 1
-    fi
-fi
 
 # Validator gives score for VLC validation (protocol correctness)
 SCORE=100  # VLC validation passes with perfect score from Go validation
 
 # Submit validation response with score
-RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
-RESPONSE_HASH="0x${RESPONSE_HASH}"
-VLC_TAG=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 64)
-VLC_TAG="0x${VLC_TAG}$(printf '0%.0s' {1..40})"
+# Use TEE's responseHash if available (TEE signs this hash), otherwise generate our own
+if [ -n "$TEE_RESPONSE_HASH" ]; then
+    RESPONSE_HASH="$TEE_RESPONSE_HASH"
+    echo "      🔐 Using responseHash from TEE: ${RESPONSE_HASH:0:20}..."
+else
+    RESPONSE_HASH=$(echo -n "vlc-response-${AGENT_ID_DEC}-${VALIDATOR}-${SCORE}" | sha256sum | cut -d' ' -f1)
+    RESPONSE_HASH="0x${RESPONSE_HASH}"
+fi
+
+# VLC_TAG must be RIGHT-padded (text at beginning, zeros at end) to match contract
+VLC_TAG_HEX=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 24)
+VLC_TAG="0x${VLC_TAG_HEX}$(printf '0%.0s' {1..40})"
+
+# Build responseUri with TEE signature if available
+if [ -n "$TEE_SIGNATURE" ]; then
+    RESPONSE_URI="{\"feedback\":\"VLC validation passed\",\"teeWallet\":\"$TEE_WALLET\",\"teeSignature\":\"$TEE_SIGNATURE\"}"
+    echo "      🔏 Including TEE signature in responseUri"
+    echo "         Signature (first 20 chars): ${TEE_SIGNATURE:0:20}..."
+    echo "         Full signature will be stored on-chain"
+else
+    RESPONSE_URI="VLC validation passed - agent correctly implements causal consistency"
+fi
 
 if [ "$NETWORK" == "sepolia" ]; then
-    # On Sepolia, capture output to show errors
+    # Agent submits the validation response (with TEE signature)
+    # Using the same REQUEST_HASH that was submitted in the request and passed to TEE
     RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
         "$REQUEST_HASH" \
         "$SCORE" \
-        "VLC validation passed - agent correctly implements causal consistency" \
+        "$RESPONSE_URI" \
         "$RESPONSE_HASH" \
         "$VLC_TAG" \
-        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL 2>&1)
+        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
     RESPONSE_RESULT=$?
+
+    if [ $RESPONSE_RESULT -eq 0 ]; then
+        # Extract transaction hash from JSON output (ensure only first match)
+        RESPONSE_TX=$(echo "$RESPONSE_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+
+        echo "      ✅ Validation response submitted"
+        echo "      📝 Transaction: $RESPONSE_TX"
+        echo "      🔗 View: https://sepolia.etherscan.io/tx/$RESPONSE_TX"
+        echo "      📤 Submitted by: AGENT/MINER ($MINER_ADDRESS)"
+        echo ""
+    else
+        echo "      ❌ Failed to submit validation response"
+        echo "      Error details: $RESPONSE_OUTPUT"
+    fi
 else
-    # On local, hide output as before
-    $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+    # On local anvil network
+    # Agent submits the validation response using the same REQUEST_HASH from the request
+    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
         "$REQUEST_HASH" \
         "$SCORE" \
-        "VLC validation passed - agent correctly implements causal consistency" \
+        "$RESPONSE_URI" \
         "$RESPONSE_HASH" \
         "$VLC_TAG" \
-        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
     RESPONSE_RESULT=$?
+
+    if [ $RESPONSE_RESULT -eq 0 ]; then
+        # Extract transaction hash from JSON output
+        RESPONSE_TX=$(echo "$RESPONSE_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+
+        echo "      ✅ Validation response submitted (Local Anvil)"
+        echo "      📝 Transaction: $RESPONSE_TX"
+        echo "      📤 Submitted by: AGENT/MINER ($MINER_ADDRESS)"
+        echo "      📊 Score: $SCORE/100"
+        echo ""
+    else
+        echo "      ❌ Failed to submit validation response"
+        echo "      Error details: $RESPONSE_OUTPUT"
+    fi
 fi
 
 if [ $RESPONSE_RESULT -eq 0 ]; then
     echo "      ✅ ${VALIDATOR_NAME}: Score ${SCORE}/100 recorded"
-    echo "         Address: ${VALIDATOR}"
-    echo "         Request: ${REQUEST_HASH:0:10}..."
+    echo "         Validator Address: ${VALIDATOR}"
+    if [ -n "$REQUEST_TX" ]; then
+        echo "         Request TX: $REQUEST_TX"
+    fi
+    if [ -n "$RESPONSE_TX" ]; then
+        echo "         Response TX: $RESPONSE_TX"
+    fi
 
     # Wait for transaction to be mined and verify response was recorded
     sleep 1
@@ -1579,6 +1849,103 @@ if [ $RESPONSE_RESULT -eq 0 ]; then
     # Parse the response to check if score was recorded (response should be 100)
     if [[ "$VERIFY_RESPONSE" == *"100"* ]]; then
         echo "         ✓ Response confirmed on-chain"
+    fi
+
+    # If TEE validation was used, verify the signature (works on both anvil and sepolia)
+    if [ "$USE_TEE_VALIDATION" = "true" ] && [ -n "$RESPONSE_TX" ]; then
+        echo ""
+        echo "      🔐 Verifying TEE Signature..."
+
+        # Wait for transaction to be indexed (Sepolia needs more time than anvil)
+        if [ "$NETWORK" == "sepolia" ]; then
+            echo "         ⏳ Waiting for transaction to be indexed on Sepolia..."
+            sleep 10
+        else
+            echo "         ⏳ Waiting for transaction to be indexed..."
+            sleep 2
+        fi
+
+        # Run signature verification inline
+        TEE_WALLET_EXPECTED="0x4f5a138DeBD61Df84CB2b4580bE4cE7aD240659b"
+
+        # Get transaction input data
+        TX_INPUT=$($CAST_PATH tx $RESPONSE_TX input --rpc-url $RPC_URL 2>&1)
+
+        if [ $? -eq 0 ]; then
+            # Decode the validationResponse call
+            DECODED=$($CAST_PATH calldata-decode "validationResponse(bytes32,uint8,string,bytes32,bytes32)" "$TX_INPUT" 2>&1)
+
+            if [ $? -eq 0 ]; then
+                # Parse decoded parameters
+                VERIFY_REQUEST_HASH=$(echo "$DECODED" | sed -n '1p' | tr -d ' ')
+                VERIFY_SCORE=$(echo "$DECODED" | sed -n '2p' | tr -d ' ')
+                VERIFY_RESPONSE_URI=$(echo "$DECODED" | sed -n '3p')
+                VERIFY_RESPONSE_HASH=$(echo "$DECODED" | sed -n '4p' | tr -d ' ')
+                VERIFY_TAG=$(echo "$DECODED" | sed -n '5p' | tr -d ' ')
+
+                # Extract TEE signature from responseUri
+                VERIFY_RESPONSE_URI_CLEAN=$(echo "$VERIFY_RESPONSE_URI" | sed 's/\\"/"/g')
+                VERIFY_TEE_SIGNATURE=$(echo "$VERIFY_RESPONSE_URI_CLEAN" | grep -o '"teeSignature":"[^"]*"' | cut -d'"' -f4)
+                VERIFY_TEE_WALLET=$(echo "$VERIFY_RESPONSE_URI_CLEAN" | grep -o '"teeWallet":"[^"]*"' | cut -d'"' -f4)
+
+                if [ -n "$VERIFY_TEE_SIGNATURE" ]; then
+                    # Create verification script
+                    cat > /tmp/verify_inline_sig.js <<EOF
+const ethers = require('ethers');
+const requestHash = "$VERIFY_REQUEST_HASH";
+const score = $VERIFY_SCORE;
+const responseHash = "$VERIFY_RESPONSE_HASH";
+const vlcTag = "$VERIFY_TAG";
+const signature = "$VERIFY_TEE_SIGNATURE";
+const expectedSigner = "$TEE_WALLET_EXPECTED";
+
+const messageHash = ethers.solidityPackedKeccak256(
+    ['bytes32', 'uint8', 'bytes32', 'bytes32'],
+    [requestHash, score, responseHash, vlcTag]
+);
+
+try {
+    const recoveredAddress = ethers.verifyMessage(
+        ethers.getBytes(messageHash),
+        signature
+    );
+
+    if (recoveredAddress.toLowerCase() === expectedSigner.toLowerCase()) {
+        console.log("VALID");
+        process.exit(0);
+    } else {
+        console.log("INVALID:" + recoveredAddress);
+        process.exit(1);
+    }
+} catch (error) {
+    console.log("ERROR:" + error.message);
+    process.exit(1);
+}
+EOF
+
+                    # Run verification
+                    VERIFY_OUTPUT=$(NODE_PATH=/home/xx/code/hetu/FLUX-Mining-8004-x402/node_modules node /tmp/verify_inline_sig.js 2>&1)
+                    VERIFY_RESULT=$?
+
+                    if [ $VERIFY_RESULT -eq 0 ]; then
+                        echo "         ✅ TEE Signature VALID - Hardware-guaranteed validation confirmed"
+                        echo "            Signed by: $TEE_WALLET_EXPECTED"
+                    else
+                        echo "         ❌ TEE Signature INVALID - $VERIFY_OUTPUT"
+                        echo "            WARNING: Validation may have been tampered with!"
+                    fi
+
+                    rm -f /tmp/verify_inline_sig.js
+                else
+                    echo "         ⚠️  No TEE signature found in response"
+                fi
+            else
+                echo "         ⚠️  Could not decode transaction data"
+            fi
+        else
+            echo "         ⚠️  Could not fetch transaction data"
+            echo "            Error: $TX_INPUT"
+        fi
     fi
 else
     echo "      ⚠️  ${VALIDATOR_NAME}: Failed to record score"
@@ -1621,6 +1988,7 @@ echo "      Agent ID: #${AGENT_ID_DEC}"
 # Call getSummary function from ValidationRegistry to get actual average score
 # getSummary(agentId, validatorAddresses[], tag) returns (uint64 count, uint8 avgScore)
 # We pass empty array [] to get all validators and VLC_PROTOCOL tag
+# VLC_TAG must be RIGHT-padded (text at beginning, zeros at end) to match contract
 VLC_TAG="0x564c435f50524f544f434f4c0000000000000000000000000000000000000000"
 
 # Call with empty validator array to get all validators' scores
@@ -1753,39 +2121,41 @@ else
     echo ""
 
     if [ "$NETWORK" == "sepolia" ]; then
-    # On Sepolia, capture output to show errors
-    REGISTER_OUTPUT=$($CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
-        "$SUBNET_ID" \
-        "$AGENT_ID_DEC" \
-        "$MINER" \
-        "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
-    REGISTER_RESULT=$?
+        # On Sepolia, capture output to show errors
+        REGISTER_OUTPUT=$($CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
+            "$SUBNET_ID" \
+            "$AGENT_ID_DEC" \
+            "$MINER" \
+            "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
+            --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
+        REGISTER_RESULT=$?
 
-    if [ $REGISTER_RESULT -eq 0 ]; then
-        echo "✅ Subnet registered successfully on blockchain"
+        if [ $REGISTER_RESULT -eq 0 ]; then
+            echo "✅ Subnet registered successfully on blockchain"
+        else
+            echo "❌ Subnet registration failed"
+            echo "   Error details: $REGISTER_OUTPUT"
+            cleanup
+            exit 1
+        fi
     else
-        echo "❌ Subnet registration failed"
-        echo "   Error details: $REGISTER_OUTPUT"
-        cleanup
-        exit 1
-    fi
-else
-    # On local, hide output as before
-    $CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
-        "$SUBNET_ID" \
-        "$AGENT_ID_DEC" \
-        "$MINER" \
-        "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+        # On local, capture output to show errors
+        REGISTER_OUTPUT=$($CAST_PATH send $REGISTRY_ADDRESS "registerSubnet(string,uint256,address,address[4])" \
+            "$SUBNET_ID" \
+            "$AGENT_ID_DEC" \
+            "$MINER" \
+            "[$VALIDATOR1,$VALIDATOR2,$VALIDATOR3,$VALIDATOR4]" \
+            --private-key $MINER_KEY --rpc-url $RPC_URL 2>&1)
+        REGISTER_RESULT=$?
 
-    if [ $? -eq 0 ]; then
-        echo "✅ Subnet registered successfully on blockchain"
-    else
-        echo "❌ Subnet registration failed"
-        cleanup
-        exit 1
-    fi
+        if [ $REGISTER_RESULT -eq 0 ]; then
+            echo "✅ Subnet registered successfully on blockchain"
+        else
+            echo "❌ Subnet registration failed"
+            echo "   Error details: $REGISTER_OUTPUT"
+            cleanup
+            exit 1
+        fi
     fi  # End of network-specific registration
 fi  # End of subnet already registered check
 
@@ -1801,8 +2171,16 @@ echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
 echo ""
 
 # Step 3: Run the full per-epoch subnet demo
-# Increased timeout for Sepolia (slow block times: ~15-30s per tx, 7 tasks = ~3-5 minutes)
-timeout 400 go run main.go || true
+# Export all necessary variables for Go code to use
+export AGENT_ID_DEC
+export RPC_URL
+export REPUTATION_REGISTRY_ADDRESS
+export IDENTITY_REGISTRY_ADDRESS
+export CHAIN_ID
+export MINER_KEY
+export CLIENT_KEY=$PRIVATE_KEY_CLIENT
+export CLIENT_ADDRESS
+go run main.go agent_http_server.go
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

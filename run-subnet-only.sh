@@ -156,8 +156,8 @@ echo "  Round 4-6  → Epoch 2 → Immediate mainnet submission"
 echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
 echo ""
 
-# Run the Go subnet system
-go run main.go
+# Run the Go subnet system (include agent_http_server.go for TEE validation support)
+go run main.go agent_http_server.go
 
 # This line will be reached if main.go exits normally
 echo ""

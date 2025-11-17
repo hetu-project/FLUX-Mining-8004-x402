@@ -82,8 +82,11 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 		rpcURL = "http://localhost:8545" // Default to localhost if not set
 	}
 
+	// Check if running in validation-only mode
+	validationOnlyMode := os.Getenv("VALIDATION_ONLY_MODE") == "true"
+
 	var paymentCoord *subnet.PaymentCoordinator
-	if !subnetOnlyMode {
+	if !subnetOnlyMode && !validationOnlyMode {
 		// Initialize payment coordinator (x402 payment system)
 		fmt.Println("💰 Initializing x402 Payment System...")
 
@@ -122,17 +125,29 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 			fmt.Printf("   Minimum payment: 10 %s\n", paymentCoord.GetPaymentTokenName())
 		}
 	} else {
-		fmt.Println("⏭️  Skipping payment system initialization (subnet-only mode)")
+		if validationOnlyMode {
+			fmt.Println("⏭️  Skipping payment system initialization (validation-only mode)")
+		} else {
+			fmt.Println("⏭️  Skipping payment system initialization (subnet-only mode)")
+		}
 		paymentCoord = nil
 	}
 
 	var reputationManager *subnet.ReputationFeedbackManager
 	var reputationSubmitter *subnet.ReputationBatchSubmitter
-	if !subnetOnlyMode {
+
+	// Skip reputation system if in validation-only mode (agent not registered yet)
+	if !subnetOnlyMode && !validationOnlyMode {
 		// Initialize reputation feedback manager
 		fmt.Println("⭐ Initializing Reputation Feedback System...")
-		// IdentityRegistry address from contract_addresses.json
-		identityRegistryAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+
+		// IdentityRegistry address from environment
+		identityRegistryAddrStr := os.Getenv("IDENTITY_REGISTRY_ADDRESS")
+		if identityRegistryAddrStr == "" {
+			fmt.Printf("❌ IDENTITY_REGISTRY_ADDRESS not set\n")
+			os.Exit(1)
+		}
+		identityRegistryAddr := common.HexToAddress(identityRegistryAddrStr)
 
 		// Get chain ID from environment or default to 31337 (local)
 		chainIDStr := os.Getenv("CHAIN_ID")
@@ -155,8 +170,24 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 			clientAddr = "0xfA6EC9Cf1E293A91a8ea2EdCc4A2324d48129821" // Sepolia client with USDC
 		}
 
+		// Get agent ID from environment (set by run-flux-mining.sh after querying blockchain)
+		agentIDStr := os.Getenv("AGENT_ID_DEC")
+		if agentIDStr == "" {
+			fmt.Printf("❌ AGENT_ID_DEC not set - agent must be registered on blockchain first\n")
+			fmt.Printf("   Run the script which queries/registers agent ID from IdentityRegistry\n")
+			os.Exit(1)
+		}
+
+		agentID, err := strconv.ParseUint(agentIDStr, 10, 64)
+		if err != nil {
+			fmt.Printf("❌ Invalid AGENT_ID_DEC: %s - must be a valid number\n", agentIDStr)
+			os.Exit(1)
+		}
+
+		fmt.Printf("   Using Agent ID: %d (from blockchain)\n", agentID)
+
 		reputationMgr, err := subnet.NewReputationFeedbackManager(
-			0,                               // Agent ID 0 (Miner)
+			agentID,                         // Agent ID from environment (e.g., 1168)
 			minerKey,                        // Miner's private key - from environment or local fallback
 			common.HexToAddress(clientAddr), // Client address - from environment or local fallback
 			identityRegistryAddr,
@@ -172,8 +203,20 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 
 		// Initialize reputation batch submitter (client-side)
 		if reputationMgr != nil {
-			// ReputationRegistry address from contract_addresses.json
-			reputationRegistryAddr := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+			// ReputationRegistry address from environment or contract_addresses.json
+			reputationRegistryAddrStr := os.Getenv("REPUTATION_REGISTRY_ADDRESS")
+			if reputationRegistryAddrStr == "" {
+				fmt.Printf("❌ REPUTATION_REGISTRY_ADDRESS not set\n")
+				os.Exit(1)
+			}
+			reputationRegistryAddr := common.HexToAddress(reputationRegistryAddrStr)
+
+			// Initialize TaskIndexCounter from blockchain to prevent IndexLimit errors
+			err = reputationMgr.InitializeFromBlockchain(rpcURL, reputationRegistryAddr)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to initialize from blockchain: %v\n", err)
+				fmt.Println("   Continuing with TaskIndexCounter = 0...")
+			}
 
 			// Get client key from environment or fallback to Sepolia
 			clientKey := os.Getenv("CLIENT_KEY")
@@ -198,7 +241,11 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 		}
 		reputationManager = reputationMgr
 	} else {
-		fmt.Println("⏭️  Skipping reputation system initialization (subnet-only mode)")
+		if validationOnlyMode {
+			fmt.Println("⏭️  Skipping reputation system initialization (validation-only mode)")
+		} else {
+			fmt.Println("⏭️  Skipping reputation system initialization (subnet-only mode)")
+		}
 		reputationManager = nil
 		reputationSubmitter = nil
 	}

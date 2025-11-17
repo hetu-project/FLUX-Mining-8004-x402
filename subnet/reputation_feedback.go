@@ -94,8 +94,91 @@ func NewReputationFeedbackManager(
 		ChainID:          big.NewInt(int64(chainID)),
 		CurrentEpoch:     1,
 		EpochBatches:     make([]EpochFeedbackBatch, 0),
-		TaskIndexCounter: 0,
+		TaskIndexCounter: 0, // Will be initialized from blockchain
 	}, nil
+}
+
+// InitializeFromBlockchain queries the blockchain to get the current lastIndex
+// and initializes TaskIndexCounter appropriately. This prevents IndexLimit errors.
+func (rfm *ReputationFeedbackManager) InitializeFromBlockchain(
+	rpcURL string,
+	reputationRegistryAddr common.Address,
+) error {
+	// Connect to Ethereum node
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to Ethereum node: %w", err)
+	}
+	defer client.Close()
+
+	// Query getLastIndex from ReputationRegistry
+	lastIndex, err := queryLastIndex(client, reputationRegistryAddr, rfm.AgentID, rfm.ClientAddress)
+	if err != nil {
+		return fmt.Errorf("failed to query lastIndex: %w", err)
+	}
+
+	// Initialize TaskIndexCounter to current blockchain state
+	rfm.TaskIndexCounter = lastIndex
+
+	if lastIndex > 0 {
+		fmt.Printf("📊 Initialized TaskIndexCounter from blockchain: %d\n", lastIndex)
+		fmt.Printf("   Next feedback will use indexLimit: %d\n", lastIndex+1)
+	}
+
+	return nil
+}
+
+// queryLastIndex queries the ReputationRegistry contract for the current lastIndex
+func queryLastIndex(
+	client *ethclient.Client,
+	reputationRegistry common.Address,
+	agentID *big.Int,
+	clientAddress common.Address,
+) (uint64, error) {
+	// Define ABI for getLastIndex function
+	getLastIndexABI := `[{
+		"inputs": [
+			{"internalType": "uint256", "name": "agentId", "type": "uint256"},
+			{"internalType": "address", "name": "clientAddress", "type": "address"}
+		],
+		"name": "getLastIndex",
+		"outputs": [
+			{"internalType": "uint64", "name": "", "type": "uint64"}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	}]`
+
+	parsedABI, err := abi.JSON(strings.NewReader(getLastIndexABI))
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse ABI: %w", err)
+	}
+
+	// Encode function call
+	data, err := parsedABI.Pack("getLastIndex", agentID, clientAddress)
+	if err != nil {
+		return 0, fmt.Errorf("failed to pack function call: %w", err)
+	}
+
+	// Make the call
+	msg := ethereum.CallMsg{
+		To:   &reputationRegistry,
+		Data: data,
+	}
+
+	result, err := client.CallContract(context.Background(), msg, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to call contract: %w", err)
+	}
+
+	// Unpack the result
+	var lastIndex uint64
+	err = parsedABI.UnpackIntoInterface(&lastIndex, "getLastIndex", result)
+	if err != nil {
+		return 0, fmt.Errorf("failed to unpack result: %w", err)
+	}
+
+	return lastIndex, nil
 }
 
 // GenerateFeedbackAuth creates a signed authorization for user to submit feedback
@@ -473,7 +556,7 @@ func (rbs *ReputationBatchSubmitter) submitSingleFeedback(
 	}
 
 	if receipt.Status != 1 {
-		return txHash, fmt.Errorf("transaction reverted")
+		return txHash, fmt.Errorf("transaction reverted - TX: https://sepolia.etherscan.io/tx/%s", txHash)
 	}
 
 	return txHash, nil
