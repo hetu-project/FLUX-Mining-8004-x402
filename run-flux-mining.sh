@@ -580,45 +580,19 @@ EOF
     VERIFIER_ADDRESS="$POCW_VERIFIER_ADDRESS"
     ESCROW_ADDRESS="$X402_PAYMENT_ESCROW_ADDRESS"
 
-    # Check if miner already has an agent ID registered
-    echo "🆔 Checking miner registration..."
+    # Handle agent ID based on network type
+    echo "🆔 Setting up miner agent ID..."
     AGENT_ID_FILE=".sepolia_agent_id_${MINER}"
     AGENT_ID_DEC=""
 
-    # First, check if miner owns any identity tokens using balanceOf
-    TOKEN_BALANCE=$($CAST_PATH call $IDENTITY_ADDRESS "balanceOf(address)(uint256)" $MINER --rpc-url $RPC_URL 2>/dev/null || echo "0")
-
-    if [ "$TOKEN_BALANCE" != "0" ] && [ "$TOKEN_BALANCE" -gt 0 ]; then
-        echo "   📋 Miner already has $TOKEN_BALANCE agent ID(s) registered on-chain"
-
-        # Check if we have it stored locally
-        if [ -f "$AGENT_ID_FILE" ]; then
-            AGENT_ID_DEC=$(cat "$AGENT_ID_FILE")
-            echo "   📋 Using stored Agent ID: $AGENT_ID_DEC"
-
-            # Verify ownership
-            OWNER=$($CAST_PATH call $IDENTITY_ADDRESS "ownerOf(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null || echo "0x0")
-            if [ "${OWNER,,}" != "${MINER,,}" ]; then
-                echo "   ⚠️  Stored Agent ID is invalid, please find correct ID"
-                echo "   Check: https://sepolia.etherscan.io/token/$IDENTITY_ADDRESS?a=$MINER"
-                echo "   Save the correct Agent ID to: $AGENT_ID_FILE"
-                exit 1
-            fi
-            echo "   ✅ Verified: Miner owns Agent ID $AGENT_ID_DEC"
-        else
-            echo "   ⚠️  Agent ID not found locally"
-            echo "   Please find your agent ID on Sepolia Etherscan:"
-            echo "   https://sepolia.etherscan.io/token/$IDENTITY_ADDRESS?a=$MINER"
-            echo "   Then save it to: $AGENT_ID_FILE"
-            echo ""
-            echo "   Example: echo \"YOUR_AGENT_ID\" > $AGENT_ID_FILE"
-            exit 1
-        fi
+    if [ "$NETWORK" = "sepolia" ]; then
+        # For Sepolia, use hardcoded agent ID 1168
+        AGENT_ID_DEC=1168
+        echo "   📋 Agent wallet address already registered with ID: $AGENT_ID_DEC"
+        echo "$AGENT_ID_DEC" > "$AGENT_ID_FILE"
     else
-        echo "   📋 No agent ID found on-chain, will register new identity"
-
-        # Register miner with ERC-8004 identity
-        echo "   🆔 Registering miner with ERC-8004 identity on Sepolia..."
+        # For local anvil, always register new agent
+        echo "   🆔 Registering miner with ERC-8004 identity..."
 
         REGISTER_TX=$($CAST_PATH send $IDENTITY_ADDRESS "register()" \
             --private-key $MINER_KEY \

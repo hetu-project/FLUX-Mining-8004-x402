@@ -166,6 +166,29 @@ FLUX Mining enables **Intelligence Money** through permissionless agentic coordi
                              └────────────────┘              └──────────────┘
 ```
 
+## 📈 VLC Graph Visualization
+
+The Vector Logical Clock (VLC) protocol creates a verifiable causal graph of all agent interactions. Below are examples of the causal dependency graph generated during subnet operations:
+
+### VLC Causal Graph
+![VLC Causal Graph](docs/vlc_graph.png)
+*Agent interactions and message flow with VLC clock increments showing causal ordering*
+
+### Subnet Consensus Graph
+![Subnet Consensus Graph](docs/graph_2.png)
+*Complete view of the distributed consensus process with VLC-based causal consistency*
+
+These graphs demonstrate how FLUX Mining creates a **contextual knowledge graph** from AI agent interactions, where each node represents a causally-ordered event and edges show dependencies - similar to LangGraph but without vendor lock-in.
+
+**Applications of Causal Agent Graphs:**
+- **🧠 Reinforcement Learning** - Train agents using verified causal traces of all interactions
+- **🎯 Agent Alignment** - Analyze causal patterns to ensure agents follow intended behaviors
+- **⭐ Reputation Systems** - Build trust scores from causal history of agent performance
+- **💎 Merit-Based Rewards** - Distribute tokens based on causal relationships to outcomes
+- **🔍 Debugging & Auditing** - Trace exact causal paths that led to specific results
+- **📊 Behavioral Analytics** - Mine patterns in agent decision-making across the graph
+- **🛡️ Anti-Gaming Verification** - Cross-reference x402 payment transactions with causal sub-graphs to verify genuine intelligence work versus wash trading or reputation manipulation
+
 ## 💰 Payment Flows
 
 ### Direct Mode (Default)
