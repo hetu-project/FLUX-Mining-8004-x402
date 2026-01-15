@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--payment-token USDC|AIUSD] [--network local|sepolia] [--payment-mode direct|escrow|hybrid]"
+            echo "Usage: $0 [--payment-token USDC|AIUSD] [--network local|sepolia] [--payment-mode direct|session]"
             exit 1
             ;;
     esac
@@ -53,10 +53,10 @@ if [[ "$NETWORK" != "local" && "$NETWORK" != "sepolia" ]]; then
     exit 1
 fi
 
-# Validate payment mode
-if [[ "$PAYMENT_MODE" != "direct" && "$PAYMENT_MODE" != "escrow" && "$PAYMENT_MODE" != "hybrid" ]]; then
+# Validate payment mode (x402 V2: direct or session)
+if [[ "$PAYMENT_MODE" != "direct" && "$PAYMENT_MODE" != "session" ]]; then
     echo "❌ Invalid payment mode: $PAYMENT_MODE"
-    echo "   Must be either 'direct', 'escrow', or 'hybrid'"
+    echo "   Must be either 'direct' or 'session'"
     exit 1
 fi
 
@@ -64,11 +64,9 @@ echo "🌐 Network: $NETWORK"
 echo "💵 Payment Token: $PAYMENT_TOKEN"
 echo "💳 Payment Mode: $PAYMENT_MODE"
 if [ "$PAYMENT_MODE" == "direct" ]; then
-    echo "   → Standard x402 direct payments (no escrow)"
-elif [ "$PAYMENT_MODE" == "escrow" ]; then
-    echo "   → Enhanced escrow-based payments"
-elif [ "$PAYMENT_MODE" == "hybrid" ]; then
-    echo "   → Both direct and escrow payments available"
+    echo "   → x402 V2 direct payments (per-task)"
+elif [ "$PAYMENT_MODE" == "session" ]; then
+    echo "   → x402 V2 session-based payments (per-epoch, 3 tasks per session)"
 fi
 echo ""
 
@@ -648,6 +646,83 @@ EOF
         fi
     fi
 
+    # Bind agent wallet (ERC-8004 v1.0)
+    echo ""
+    echo "🔐 Binding agent wallet to identity..."
+    echo "   Agent ID: $AGENT_ID_DEC"
+    echo "   Wallet: $MINER"
+
+    # Check if wallet is already bound
+    CURRENT_WALLET=$($CAST_PATH call $IDENTITY_ADDRESS "getAgentWallet(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null || echo "0x0")
+
+    if [ "$CURRENT_WALLET" != "0x0000000000000000000000000000000000000000" ] && [ -n "$CURRENT_WALLET" ]; then
+        echo "   ✅ Wallet already bound: $CURRENT_WALLET"
+    else
+        # Generate EIP-712 signature and bind wallet
+        # Deadline: 5 minutes from now
+        DEADLINE=$(($(date +%s) + 300))
+
+        echo "   📝 Generating EIP-712 signature for wallet binding..."
+        echo "      Deadline: $DEADLINE"
+
+        # Use cast to create EIP-712 signature
+        # The miner wallet signs consent to be bound to the agent
+        WALLET_SIG=$($CAST_PATH wallet sign-typed-data \
+            --private-key $MINER_KEY \
+            --data '{
+                "types": {
+                    "EIP712Domain": [
+                        {"name": "name", "type": "string"},
+                        {"name": "version", "type": "string"},
+                        {"name": "chainId", "type": "uint256"},
+                        {"name": "verifyingContract", "type": "address"}
+                    ],
+                    "AgentWalletSet": [
+                        {"name": "agentId", "type": "uint256"},
+                        {"name": "newWallet", "type": "address"},
+                        {"name": "owner", "type": "address"},
+                        {"name": "deadline", "type": "uint256"}
+                    ]
+                },
+                "primaryType": "AgentWalletSet",
+                "domain": {
+                    "name": "ERC8004IdentityRegistry",
+                    "version": "1",
+                    "chainId": '${CHAIN_ID}',
+                    "verifyingContract": "'${IDENTITY_ADDRESS}'"
+                },
+                "message": {
+                    "agentId": "'${AGENT_ID_DEC}'",
+                    "newWallet": "'${MINER}'",
+                    "owner": "'${MINER}'",
+                    "deadline": "'${DEADLINE}'"
+                }
+            }' 2>&1)
+
+        if [ $? -eq 0 ] && [ -n "$WALLET_SIG" ]; then
+            echo "      ✅ Signature generated: ${WALLET_SIG:0:20}..."
+
+            # Submit setAgentWallet transaction
+            BIND_TX=$($CAST_PATH send $IDENTITY_ADDRESS \
+                "setAgentWallet(uint256,address,uint256,bytes)" \
+                $AGENT_ID_DEC \
+                $MINER \
+                $DEADLINE \
+                $WALLET_SIG \
+                --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
+
+            if [ $? -eq 0 ]; then
+                BIND_TX_HASH=$(echo "$BIND_TX" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+                echo "      ✅ Wallet bound successfully"
+                echo "      📝 Transaction: $BIND_TX_HASH"
+            else
+                echo "      ⚠️  Wallet binding failed (non-critical): $BIND_TX"
+            fi
+        else
+            echo "      ⚠️  Could not generate signature (non-critical): $WALLET_SIG"
+        fi
+    fi
+
     # Distribute HETU and USDC tokens to participants
     echo ""
     echo "💰 Distributing tokens to participants on Sepolia..."
@@ -971,6 +1046,84 @@ else
     AGENT_ID_DEC="0"
 fi
 
+# Bind agent wallet (ERC-8004 v1.0)
+echo ""
+echo "🔐 Binding agent wallet to identity..."
+echo "   Agent ID: $AGENT_ID_DEC"
+echo "   Wallet: $MINER"
+
+# Check if wallet is already bound
+CURRENT_WALLET=$($CAST_PATH call $IDENTITY_ADDRESS "getAgentWallet(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null || echo "0x0")
+
+if [ "$CURRENT_WALLET" != "0x0000000000000000000000000000000000000000" ] && [ -n "$CURRENT_WALLET" ]; then
+    echo "   ✅ Wallet already bound: $CURRENT_WALLET"
+else
+    # Generate EIP-712 signature and bind wallet
+    # Deadline: 5 minutes from now
+    DEADLINE=$(($(date +%s) + 300))
+
+    echo "   📝 Generating EIP-712 signature for wallet binding..."
+    echo "      Deadline: $DEADLINE"
+
+    # Use cast to create EIP-712 signature
+    # The miner wallet signs consent to be bound to the agent
+    # Local anvil uses chainId 31337
+    WALLET_SIG=$($CAST_PATH wallet sign-typed-data \
+        --private-key $MINER_KEY \
+        --data '{
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "AgentWalletSet": [
+                    {"name": "agentId", "type": "uint256"},
+                    {"name": "newWallet", "type": "address"},
+                    {"name": "owner", "type": "address"},
+                    {"name": "deadline", "type": "uint256"}
+                ]
+            },
+            "primaryType": "AgentWalletSet",
+            "domain": {
+                "name": "ERC8004IdentityRegistry",
+                "version": "1",
+                "chainId": 31337,
+                "verifyingContract": "'${IDENTITY_ADDRESS}'"
+            },
+            "message": {
+                "agentId": "'${AGENT_ID_DEC}'",
+                "newWallet": "'${MINER}'",
+                "owner": "'${MINER}'",
+                "deadline": "'${DEADLINE}'"
+            }
+        }' 2>&1)
+
+    if [ $? -eq 0 ] && [ -n "$WALLET_SIG" ]; then
+        echo "      ✅ Signature generated: ${WALLET_SIG:0:20}..."
+
+        # Submit setAgentWallet transaction
+        BIND_TX=$($CAST_PATH send $IDENTITY_ADDRESS \
+            "setAgentWallet(uint256,address,uint256,bytes)" \
+            $AGENT_ID_DEC \
+            $MINER \
+            $DEADLINE \
+            $WALLET_SIG \
+            --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
+
+        if [ $? -eq 0 ]; then
+            BIND_TX_HASH=$(echo "$BIND_TX" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+            echo "      ✅ Wallet bound successfully"
+            echo "      📝 Transaction: $BIND_TX_HASH"
+        else
+            echo "      ⚠️  Wallet binding failed (non-critical): $BIND_TX"
+        fi
+    else
+        echo "      ⚠️  Could not generate signature (non-critical): $WALLET_SIG"
+    fi
+fi
+
 echo ""
 echo "📋 VLC Protocol Validation"
 echo "────────────────────────────────────────────"
@@ -1001,7 +1154,7 @@ VERIFIER_RESULT=$($FORGE_PATH create contracts/PoCWVerifier.sol:PoCWVerifier \
     --private-key $PRIVATE_KEY --rpc-url $RPC_URL --broadcast 2>&1)
 VERIFIER_ADDRESS=$(echo "$VERIFIER_RESULT" | grep -o "Deployed to: 0x[a-fA-F0-9]\{40\}" | cut -d' ' -f3)
 
-echo "🔒 Deploying x402PaymentEscrow..."
+echo "🔒 Deploying x402 Payment Infrastructure..."
 
 # Ensure PAYMENT_TOKEN_ADDRESS is set before deploying escrow
 if [ -z "$PAYMENT_TOKEN_ADDRESS" ]; then
@@ -1100,14 +1253,14 @@ else
 fi
 echo "   - 500 $PAYMENT_TOKEN tokens for payment operations"
 
-echo "🔓 Approving escrow to spend facilitator's $PAYMENT_TOKEN..."
-# Facilitator approves escrow contract to spend payment tokens
+echo "🔓 Setting up facilitator payment permissions..."
+# Facilitator approves payment contracts
 timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
     --private-key $FACILITATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    echo "   ✅ Facilitator approved escrow for $PAYMENT_TOKEN spending"
+    echo "   ✅ Facilitator payment permissions set"
 else
-    echo "   ⚠️  Failed to approve escrow for facilitator"
+    echo "   ⚠️  Failed to set facilitator permissions"
 fi
 
 echo "🔓 Approving facilitator to spend client's $PAYMENT_TOKEN (for direct payments)..."
@@ -1128,14 +1281,14 @@ else
     echo "   ⚠️  Failed to approve facilitator"
 fi
 
-echo "🔓 Approving escrow to spend client's $PAYMENT_TOKEN (for escrow payments)..."
-# Client approves escrow contract to spend payment tokens for escrow payments
+echo "🔓 Approving payment contracts for client's $PAYMENT_TOKEN..."
+# Client approves payment contracts for fallback compatibility
 timeout 3 $CAST_PATH send $PAYMENT_TOKEN_ADDRESS "approve(address,uint256)" $ESCROW_ADDRESS "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" \
     --private-key $CLIENT_KEY --rpc-url $RPC_URL > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    echo "   ✅ Client approved escrow to spend $PAYMENT_TOKEN"
+    echo "   ✅ Client payment approvals complete"
 else
-    echo "   ⚠️  Failed to approve escrow"
+    echo "   ⚠️  Failed to complete payment approvals"
 fi
 
 # Approvals
@@ -1693,7 +1846,7 @@ if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
         VLC_TAG="0x${VLC_TAG_HEX}$(printf '0%.0s' {1..40})"
 
         # Agent submits the validation response (even for failures)
-        $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+        $CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
             "$REQUEST_HASH" \
             "$SCORE" \
             "VLC validation failed - agent does not implement causal consistency correctly" \
@@ -1737,9 +1890,8 @@ else
     RESPONSE_HASH="0x${RESPONSE_HASH}"
 fi
 
-# VLC_TAG must be RIGHT-padded (text at beginning, zeros at end) to match contract
-VLC_TAG_HEX=$(echo -n "VLC_PROTOCOL" | xxd -p -c 32 | head -c 24)
-VLC_TAG="0x${VLC_TAG_HEX}$(printf '0%.0s' {1..40})"
+# VLC_TAG as string (ERC-8004 v1.0)
+VLC_TAG="VLC_PROTOCOL"
 
 # Build responseUri with TEE signature if available
 if [ -n "$TEE_SIGNATURE" ]; then
@@ -1754,7 +1906,7 @@ fi
 if [ "$NETWORK" == "sepolia" ]; then
     # Agent submits the validation response (with TEE signature)
     # Using the same REQUEST_HASH that was submitted in the request and passed to TEE
-    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
         "$REQUEST_HASH" \
         "$SCORE" \
         "$RESPONSE_URI" \
@@ -1779,7 +1931,7 @@ if [ "$NETWORK" == "sepolia" ]; then
 else
     # On local anvil network
     # Agent submits the validation response using the same REQUEST_HASH from the request
-    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,bytes32)" \
+    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
         "$REQUEST_HASH" \
         "$SCORE" \
         "$RESPONSE_URI" \
@@ -1847,7 +1999,7 @@ if [ $RESPONSE_RESULT -eq 0 ]; then
 
         if [ $? -eq 0 ]; then
             # Decode the validationResponse call
-            DECODED=$($CAST_PATH calldata-decode "validationResponse(bytes32,uint8,string,bytes32,bytes32)" "$TX_INPUT" 2>&1)
+            DECODED=$($CAST_PATH calldata-decode "validationResponse(bytes32,uint8,string,bytes32,string)" "$TX_INPUT" 2>&1)
 
             if [ $? -eq 0 ]; then
                 # Parse decoded parameters
@@ -1962,8 +2114,8 @@ echo "      Agent ID: #${AGENT_ID_DEC}"
 # Call getSummary function from ValidationRegistry to get actual average score
 # getSummary(agentId, validatorAddresses[], tag) returns (uint64 count, uint8 avgScore)
 # We pass empty array [] to get all validators and VLC_PROTOCOL tag
-# VLC_TAG must be RIGHT-padded (text at beginning, zeros at end) to match contract
-VLC_TAG="0x564c435f50524f544f434f4c0000000000000000000000000000000000000000"
+# ERC-8004 v1.0: tag is now string, not bytes32
+VLC_TAG="VLC_PROTOCOL"
 
 # Call with empty validator array to get all validators' scores
 echo "      🔍 Calling ValidationRegistry.getSummary..."
@@ -1971,7 +2123,7 @@ echo "         Agent ID: $AGENT_ID_DEC"
 echo "         VLC Tag: $VLC_TAG"
 
 SUMMARY=$($CAST_PATH call $VALIDATION_ADDRESS \
-    "getSummary(uint256,address[],bytes32)(uint64,uint8)" \
+    "getSummary(uint256,address[],string)(uint64,uint8)" \
     "$AGENT_ID_DEC" \
     "[]" \
     "$VLC_TAG" \
@@ -2134,14 +2286,7 @@ else
 fi  # End of subnet already registered check
 
 echo ""
-echo "🚀 Starting full subnet demo with per-epoch submission..."
-echo "   This will process 7 inputs across multiple epochs"
-echo "   Each epoch (3 rounds) will be submitted to blockchain immediately"
-echo ""
-echo "🎯 Demo Flow:"
-echo "  Round 1-3  → Epoch 1 → Immediate mainnet submission"
-echo "  Round 4-6  → Epoch 2 → Immediate mainnet submission"
-echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
+echo "🚀 Starting demo: 7 rounds → 2 epochs (3 rounds each) + 1 partial"
 echo ""
 
 # Step 3: Run the full per-epoch subnet demo
@@ -2154,6 +2299,7 @@ export CHAIN_ID
 export MINER_KEY
 export CLIENT_KEY=$PRIVATE_KEY_CLIENT
 export CLIENT_ADDRESS
+export PAYMENT_MODE
 go run main.go agent_http_server.go
 
 echo ""
@@ -2230,10 +2376,11 @@ echo ""
 echo "📊 Agent ID $AGENT_ID_DEC Reputation on Blockchain:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Call getSummary(uint256, address[], bytes32, bytes32) returns (uint64, uint8)
-# Parameters: agentId, clientAddresses (empty array), tag1 (0x0), tag2 (0x0)
-REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],bytes32,bytes32)(uint64,uint8)" \
-    $AGENT_ID_DEC "[]" "0x0000000000000000000000000000000000000000000000000000000000000000" "0x0000000000000000000000000000000000000000000000000000000000000000" \
+# Call getSummary(uint256, address[], string, string) returns (uint64, uint8)
+# Parameters: agentId, clientAddresses (empty array), tag1 (empty), tag2 (empty)
+# ERC-8004 v1.0: tags are now strings, not bytes32
+REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],string,string)(uint64,uint8)" \
+    $AGENT_ID_DEC "[]" '""' '""' \
     --rpc-url $RPC_URL 2>&1)
 
 if echo "$REPUTATION_DATA" | grep -q "^[0-9]"; then

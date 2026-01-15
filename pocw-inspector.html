@@ -49,6 +49,8 @@
             <h2>Contract Inspector</h2>
             <select id="contractSelect">
                 <option value="identity">ERC-8004 Identity Registry</option>
+                <option value="reputation">Reputation Registry</option>
+                <option value="validation">Validation Registry</option>
                 <option value="hetu">HETU Token</option>
                 <option value="flux">Intelligence Token (FLUX)</option>
                 <option value="payment">Payment Token (USDC/AIUSD)</option>
@@ -82,6 +84,7 @@
             <p style="color: #888; margin: 10px 0;">View agent reputation scores from user feedback</p>
             <input type="number" id="reputationAgentId" placeholder="Agent ID (e.g., 0)" style="width: 150px;">
             <button class="btn" onclick="getAgentReputation()">Check Agent Reputation</button>
+            <button class="btn" onclick="getFeedbackTransactions()">View Feedback Transactions</button>
             <div id="reputation-output" class="output">Enter Agent ID to check reputation scores...</div>
         </div>
 
@@ -114,13 +117,14 @@
         let paymentTokenName = "USDC"; // Will be loaded from contract_addresses.json (USDC or AIUSD)
         let contractAddresses = {
             "IdentityRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            "HETUToken": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-            "FLUXToken": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            "ReputationRegistry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0", // Will be updated from contract_addresses.json
-            "PaymentToken": "",  // Will be loaded from contract_addresses.json (USDC or AIUSD)
-            "x402PaymentEscrow": "",  // Will be loaded from contract_addresses.json
-            "SubnetRegistry": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-            "PoCWVerifier": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+            "ValidationRegistry": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+            "ReputationRegistry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+            "HETUToken": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+            "FLUXToken": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+            "PaymentToken": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+            "x402PaymentEscrow": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+            "SubnetRegistry": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+            "PoCWVerifier": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
         };
 
         const contractABIsByType = {
@@ -131,10 +135,12 @@
                 "function symbol() view returns (string)"
             ],
             "ValidationRegistry": [
-                "function getValidationStatus(bytes32) view returns (address,uint256,uint8,bytes32,bytes32,uint256)",
+                "function getValidationStatus(bytes32) view returns (address,uint256,uint8,bytes32,string,uint256,bool)",
                 "function getAgentValidations(uint256) view returns (bytes32[])",
                 "function getValidatorRequests(address) view returns (bytes32[])",
-                "function getSummary(uint256,address[],bytes32) view returns (uint64,uint8)"
+                "function getSummary(uint256,address[],string) view returns (uint64,uint8)",
+                "function validationRequest(address,uint256,string,bytes32)",
+                "function validationResponse(bytes32,uint8,string,bytes32,string)"
             ],
             "HETUToken": [
                 "function balanceOf(address) view returns (uint256)",
@@ -173,10 +179,11 @@
                 "function submitAndDistributeEpoch(string memory subnetId, bytes memory vlcGraphData, address[] memory successfulMiners, uint256 successfulTasks, uint256 failedTasks) external"
             ],
             "ReputationRegistry": [
-                "function getSummary(uint256,address[],bytes32,bytes32) view returns (uint64,uint8)",
-                "function scores(uint256,uint64) view returns (uint256,uint256,uint256)",
+                "function getSummary(uint256,address[],string,string) view returns (uint64,uint8)",
+                "function readFeedback(uint256,uint64) view returns (address,uint8,string,string,string,bool)",
                 "function feedbackIndexes(uint256,address) view returns (uint64)",
-                "event FeedbackRecorded(uint256 indexed agentId, address indexed feedbackProvider, uint64 index, uint8 score, bytes32 tag1, bytes32 tag2)"
+                "function giveFeedback(uint256 agentId, uint8 score, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash)",
+                "event NewFeedback(uint256 indexed agentId, address indexed feedbackProvider, uint64 feedbackIndex, uint8 score, string indexedTag1, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash)"
             ]
         };
 
@@ -379,6 +386,8 @@
                 // Map dropdown values to addresses
                 const addressMap = {
                     'identity': contractAddresses.IdentityRegistry,
+                    'reputation': contractAddresses.ReputationRegistry,
+                    'validation': contractAddresses.ValidationRegistry,
                     'hetu': contractAddresses.HETUToken,
                     'flux': contractAddresses.FLUXToken,
                     'payment': contractAddresses.PaymentToken,
@@ -416,6 +425,8 @@
                 // Add contract-specific info if available
                 const typeMap = {
                     'identity': 'IdentityRegistry',
+                    'reputation': 'ReputationRegistry',
+                    'validation': 'ValidationRegistry',
                     'hetu': 'HETUToken',
                     'flux': 'FLUXToken',
                     'payment': 'PaymentToken',
@@ -925,12 +936,12 @@
                 const reputation = new ethers.Contract(reputationAddress, reputationABI, provider);
 
                 // Get agent reputation using getSummary
-                // Parameters: agentId, clientAddresses (empty array), tag1 (0x0), tag2 (0x0)
+                // Parameters: agentId, clientAddresses (empty array), tag1, tag2 (ERC-8004 v1.0 uses strings)
                 const [feedbackCount, avgScore] = await reputation.getSummary(
                     agentId,
                     [], // empty array for all clients
-                    "0x0000000000000000000000000000000000000000000000000000000000000000", // tag1 = 0
-                    "0x0000000000000000000000000000000000000000000000000000000000000000"  // tag2 = 0
+                    "", // tag1 = empty string (all tags)
+                    ""  // tag2 = empty string (all tags)
                 );
 
                 let output = `
@@ -976,6 +987,114 @@
             }
         }
 
+        // Get Feedback Transactions from ReputationRegistry events
+        async function getFeedbackTransactions() {
+            try {
+                const agentIdInput = document.getElementById('reputationAgentId').value.trim();
+                if (!agentIdInput) {
+                    document.getElementById('reputation-output').innerHTML = `<div class="error">❌ Please enter an agent ID</div>`;
+                    return;
+                }
+
+                const agentId = parseInt(agentIdInput);
+                document.getElementById('reputation-output').innerHTML = `<div class="highlight">🔍 Loading feedback transactions for Agent ID ${agentId}...</div>`;
+
+                const reputationAddress = contractAddresses.ReputationRegistry;
+                const reputationABI = contractABIsByType.ReputationRegistry;
+                const reputation = new ethers.Contract(reputationAddress, reputationABI, provider);
+
+                // Get feedback count first
+                const [feedbackCount, avgScore] = await reputation.getSummary(agentId, [], "", "");
+
+                let output = `
+                    <div class="success">📝 Feedback Transactions for Agent #${agentId}</div>
+                    <div><span class="highlight">Reputation Registry:</span> <span class="address">${reputationAddress}</span></div>
+                    <div><span class="highlight">Total Feedbacks:</span> ${feedbackCount.toString()}</div>
+                    <div><span class="highlight">Average Score:</span> ${avgScore.toString()}/100</div>
+                    <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+                `;
+
+                if (feedbackCount > 0n) {
+                    // Query NewFeedback events for this agent
+                    const filter = reputation.filters.NewFeedback(agentId);
+                    const events = await reputation.queryFilter(filter, 0, 'latest');
+
+                    output += `<div class="highlight">📋 Individual Feedback Submissions:</div>`;
+
+                    for (const event of events) {
+                        const tx = await event.getTransaction();
+                        const block = await event.getBlock();
+                        const timestamp = new Date(block.timestamp * 1000).toLocaleString();
+
+                        // Parse event args
+                        const feedbackIndex = event.args[2];
+                        const score = event.args[3];
+                        const tag1 = event.args[5] || '';
+                        const tag2 = event.args[6] || '';
+                        const endpoint = event.args[7] || '';
+                        const feedbackURI = event.args[8] || '';
+
+                        output += `
+                            <div style="margin: 10px 0; padding: 12px; border: 1px solid #333; background: #111; border-left: 3px solid ${score >= 70 ? '#4CAF50' : score >= 50 ? '#ffff00' : '#ff4444'};">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                    <span class="highlight">Feedback #${feedbackIndex.toString()}</span>
+                                    <span style="color: ${score >= 70 ? '#4CAF50' : score >= 50 ? '#ffff00' : '#ff4444'}; font-size: 18px;">
+                                        Score: ${score}/100
+                                    </span>
+                                </div>
+                                <div><span class="highlight">Transaction:</span> <span class="tx-hash">${tx.hash}</span></div>
+                                <div><span class="highlight">Block:</span> ${event.blockNumber}</div>
+                                <div><span class="highlight">Time:</span> ${timestamp}</div>
+                                <div><span class="highlight">Task ID:</span> ${feedbackURI || 'N/A'}</div>
+                                <div><span class="highlight">Endpoint:</span> ${endpoint || 'N/A'}</div>
+                                <div><span class="highlight">Tags:</span> ${tag1 || 'N/A'} / ${tag2 || 'N/A'}</div>
+                                <div style="margin-top: 8px;">
+                                    <button class="btn" style="padding: 4px 8px; font-size: 11px;" onclick="document.getElementById('decodeTxHash').value='${tx.hash}'; decodeTransaction();">
+                                        Decode TX
+                                    </button>
+                                    <button class="btn" style="padding: 4px 8px; font-size: 11px;" onclick="document.getElementById('txHash').value='${tx.hash}'; getTransaction();">
+                                        View TX Details
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    if (events.length === 0) {
+                        // Fallback: Read feedbacks directly if events not available
+                        output += `<div style="color: #888;">No events found. Reading feedbacks directly...</div>`;
+
+                        for (let i = 0; i < Number(feedbackCount); i++) {
+                            try {
+                                const [provider, score, tag1, tag2, endpoint, isRevoked] = await reputation.readFeedback(agentId, i);
+                                output += `
+                                    <div style="margin: 10px 0; padding: 12px; border: 1px solid #333; background: #111; border-left: 3px solid ${score >= 70 ? '#4CAF50' : '#ff4444'};">
+                                        <div><span class="highlight">Feedback #${i}</span></div>
+                                        <div><span class="highlight">Score:</span> <span style="color: ${score >= 70 ? '#4CAF50' : '#ff4444'};">${score}/100</span></div>
+                                        <div><span class="highlight">Provider:</span> <span class="address">${provider}</span></div>
+                                        <div><span class="highlight">Tags:</span> ${tag1} / ${tag2}</div>
+                                        <div><span class="highlight">Endpoint:</span> ${endpoint}</div>
+                                        <div><span class="highlight">Revoked:</span> ${isRevoked ? '❌ Yes' : '✅ No'}</div>
+                                    </div>
+                                `;
+                            } catch (err) {
+                                console.log(`Error reading feedback ${i}:`, err);
+                            }
+                        }
+                    }
+                } else {
+                    output += `<div class="error">❌ No feedback found for Agent ID ${agentId}</div>`;
+                }
+
+                output += `</div>`;
+                document.getElementById('reputation-output').innerHTML = output;
+
+            } catch (error) {
+                console.error("❌ Feedback transactions error:", error);
+                document.getElementById('reputation-output').innerHTML = `<div class="error">❌ Error: ${error.message}</div>`;
+            }
+        }
+
         // ValidationRegistry Functions for VLC Protocol Score Verification
         async function getValidationScores() {
             try {
@@ -1004,7 +1123,9 @@
 
                 let output = `
                     <div class="success">🔍 VLC Validation Scores for Agent #${agentId}</div>
+                    <div><span class="highlight">ValidationRegistry:</span> <span class="address">${validationAddress}</span></div>
                     <div><span class="highlight">Total Validations:</span> ${requestHashes.length}</div>
+                    <div><span class="highlight">Request Hashes:</span> ${requestHashes.map(h => h.slice(0,10) + '...').join(', ')}</div>
                     <div style="margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
                 `;
 
@@ -1012,23 +1133,48 @@
                 const scores = [];
                 for (const hash of requestHashes) {
                     try {
-                        const [validatorAddress, agentIdReturned, score, responseHash, tag, timestamp] =
-                            await validationRegistry.getValidationStatus(hash);
+                        // ERC-8004 v1.0: tag is string, hasResponse added
+                        const result = await validationRegistry.getValidationStatus(hash);
+                        console.log("Validation status result:", result);
 
-                        // Check if it's a VLC validation (check first bytes of tag)
-                        const tagStr = tag.slice(0, 26); // First 12 chars of hex (VLC_PROTOCOL)
-                        const isVLC = tagStr === "0x564c435f50524f544f434f4c"; // hex for "VLC_PROTOCOL"
+                        // Handle both array and object return formats
+                        const validatorAddress = result[0];
+                        const agentIdReturned = result[1];
+                        const score = result[2];
+                        const responseHash = result[3];
+                        const tag = result[4];
+                        const timestamp = result[5];
+                        const hasResponse = result[6];
 
-                        if (isVLC) {
+                        console.log("Parsed values:", { validatorAddress, score, tag, hasResponse });
+
+                        // Show debug info for each validation
+                        output += `
+                            <div style="margin: 5px 0; padding: 8px; background: #0a0a0a; border: 1px solid #333; font-size: 11px;">
+                                <div><span class="highlight">Hash:</span> ${hash.slice(0,20)}...</div>
+                                <div><span class="highlight">Validator:</span> ${validatorAddress}</div>
+                                <div><span class="highlight">Score:</span> ${score} (type: ${typeof score})</div>
+                                <div><span class="highlight">Tag:</span> "${tag}" (type: ${typeof tag})</div>
+                                <div><span class="highlight">hasResponse:</span> ${hasResponse}</div>
+                            </div>
+                        `;
+
+                        // Check if it's a VLC validation (v1.0: tag is string "VLC_PROTOCOL")
+                        const isVLC = tag === "VLC_PROTOCOL" || (typeof tag === 'string' && tag.startsWith("VLC"));
+
+                        // Only include if hasResponse is true (validator actually responded)
+                        if (isVLC && hasResponse) {
                             scores.push({
                                 validator: validatorAddress,
                                 score: Number(score),
                                 timestamp: Number(timestamp),
-                                hash: hash
+                                hash: hash,
+                                tag: tag
                             });
                         }
                     } catch (err) {
                         console.log("Error fetching validation:", err);
+                        output += `<div class="error">Error fetching ${hash.slice(0,10)}...: ${err.message}</div>`;
                     }
                 }
 
@@ -1103,21 +1249,23 @@
 
                         for (const hash of requestHashes) {
                             try {
-                                const [validatorAddr, agentId, score, responseHash, tag, timestamp] =
+                                // ERC-8004 v1.0: tag is string, hasResponse added
+                                const [validatorAddr, agentId, score, responseHash, tag, timestamp, hasResponse] =
                                     await validationRegistry.getValidationStatus(hash);
 
-                                // Check if it's a VLC validation
-                                const tagStr = tag.slice(0, 26);
-                                const isVLC = tagStr === "0x564c435f50524f544f434f4c";
+                                // Check if it's a VLC validation (v1.0: tag is string)
+                                const isVLC = tag === "VLC_PROTOCOL" || tag.startsWith("VLC");
 
-                                if (isVLC) {
+                                // Only include if hasResponse is true
+                                if (isVLC && hasResponse) {
                                     allValidations.push({
                                         validator: validatorAddr,
                                         validatorNum: i + 1,
                                         agentId: Number(agentId),
                                         score: Number(score),
                                         timestamp: Number(timestamp),
-                                        hash: hash
+                                        hash: hash,
+                                        tag: tag
                                     });
                                 }
                             } catch (err) {

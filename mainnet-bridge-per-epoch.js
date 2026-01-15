@@ -602,24 +602,7 @@ class PerEpochMainnetBridge {
         req.on('end', async () => {
             try {
                 const epochData = JSON.parse(body);
-                console.log(`\n🚀 RECEIVED EPOCH SUBMISSION FROM GO`);
-                console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-                console.log(`📊 Epoch: ${epochData.epochNumber}`);
-                console.log(`🌐 Subnet: ${epochData.subnetId}`);
-                console.log(`⏰ Timestamp: ${new Date(epochData.timestamp * 1000).toISOString()}`);
-                console.log(`🔗 Rounds: ${epochData.completedRounds.length}`);
-                console.log(`🔍 Detailed Rounds: ${epochData.detailedRounds ? epochData.detailedRounds.length : 'undefined'}`);
-                console.log(`🕘 VLC State: ${JSON.stringify(epochData.vlcClockState)}`);
-
-                // Debug detailed round data
-                if (epochData.detailedRounds && epochData.detailedRounds.length > 0) {
-                    console.log(`🔍 DEBUG - Detailed rounds received:`);
-                    epochData.detailedRounds.forEach((round, index) => {
-                        console.log(`   Round ${index + 1}: ${round.userInput ? round.userInput.substring(0, 40) + '...' : 'No input'}`);
-                    });
-                } else {
-                    console.log(`❌ DEBUG - No detailed rounds in payload`);
-                }
+                console.log(`\n📊 Epoch ${epochData.epochNumber} received (${epochData.completedRounds.length} rounds)`);
 
                 // Submit to blockchain
                 await this.submitEpochToBlockchain(epochData);
@@ -645,20 +628,15 @@ class PerEpochMainnetBridge {
     // Submit epoch data to blockchain using the received data
     async submitEpochToBlockchain(epochData) {
         try {
-            console.log(`📤 Submitting Epoch ${epochData.epochNumber} to blockchain...`);
-
             const successfulMiners = [this.accounts.miner.address];
 
             // Use actual successful/failed counts from detailed round data
             let successfulTasks = (epochData.detailedRounds || []).filter(r => r.success).length;
             let failedTasks = (epochData.detailedRounds || []).filter(r => !r.success).length;
 
-            console.log(`📊 Task breakdown: ${successfulTasks} successful, ${failedTasks} failed (total: ${successfulTasks + failedTasks})`);
-
             // Verify we have the expected task counts
             const totalRoundsInEpoch = successfulTasks + failedTasks;
             if (totalRoundsInEpoch === 0) {
-                console.log(`⚠️  WARNING: No detailed round data available, falling back to completedRounds count`);
                 // Fallback to legacy method if detailed rounds are unavailable
                 successfulTasks = epochData.completedRounds ? epochData.completedRounds.length : 0;
                 failedTasks = 0;
@@ -669,17 +647,11 @@ class PerEpochMainnetBridge {
             let ipfsMetadata = null;
 
             if (this.USE_PINATA) {
-                // Upload to IPFS and use URI
-                console.log(`📌 Pinata mode: Uploading VLC data to IPFS...`);
                 const vlcGraph = this.createVLCGraphObject(epochData);
                 const ipfsResult = await this.uploadToPinata(vlcGraph, epochData.epochNumber);
-
-                // Store IPFS URI as bytes (much smaller than full JSON)
                 vlcGraphData = ethers.toUtf8Bytes(ipfsResult.ipfsUri);
                 ipfsMetadata = ipfsResult;
             } else {
-                // Traditional mode: encode full JSON as bytes
-                console.log(`📦 Traditional mode: Encoding full VLC data on-chain...`);
                 vlcGraphData = this.encodeVLCGraphData(epochData);
             }
 
@@ -692,9 +664,7 @@ class PerEpochMainnetBridge {
                 failedTasks
             );
 
-            console.log(`📤 Transaction submitted: ${tx.hash}`);
             const receipt = await tx.wait();
-            console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
 
             // Track submission
             const submissionKey = `${epochData.subnetId}-epoch-${epochData.epochNumber}`;
@@ -704,21 +674,13 @@ class PerEpochMainnetBridge {
                 txHash: tx.hash,
                 blockNumber: receipt.blockNumber,
                 timestamp: epochData.timestamp,
-                fluxMined: "0", // Would calculate from logs
+                fluxMined: "0",
                 ipfsUri: ipfsMetadata?.ipfsUri || null,
                 ipfsCid: ipfsMetadata?.cid || null,
                 gatewayUrl: ipfsMetadata?.gatewayUrl || null
             });
 
-            console.log(`🎉 Epoch ${epochData.epochNumber} submitted successfully!`);
-            if (ipfsMetadata) {
-                if (this.PINATA_PUBLIC) {
-                    console.log(`📌 IPFS: https://ipfs.io/ipfs/${ipfsMetadata.cid}`);
-                } else {
-                    console.log(`🔒 Private storage - NOT accessible via public IPFS`);
-                }
-            }
-            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.log(`✅ Epoch ${epochData.epochNumber} submitted: ${successfulTasks}/${successfulTasks + failedTasks} tasks (block ${receipt.blockNumber})`);
 
             return {
                 txHash: tx.hash,
@@ -751,27 +713,9 @@ class PerEpochMainnetBridge {
 
     // Encode VLC graph data for blockchain submission (traditional mode - full data on-chain)
     encodeVLCGraphData(epochData) {
-        // Create a structured representation of the VLC graph for this epoch
         const vlcGraph = this.createVLCGraphObject(epochData);
-
-        // Convert to hex-encoded bytes for smart contract
         const jsonString = JSON.stringify(vlcGraph);
-        const hexData = '0x' + Buffer.from(jsonString, 'utf8').toString('hex');
-
-        console.log(`🔗 Encoded VLC graph data: ${jsonString.length} bytes`);
-        console.log(`📊 Epoch summary: ${vlcGraph.totalRounds} rounds (${vlcGraph.successfulRounds} success, ${vlcGraph.failedRounds} failed)`);
-
-        // Log detailed round information
-        if (epochData.detailedRounds && epochData.detailedRounds.length > 0) {
-            console.log(`📋 Round details:`);
-            epochData.detailedRounds.forEach(round => {
-                const status = round.success ? '✅' : '❌';
-                const inputPreview = round.userInput.length > 40 ? round.userInput.substring(0, 40) + '...' : round.userInput;
-                console.log(`   Round ${round.roundNumber}: ${status} "${inputPreview}"`);
-            });
-        }
-
-        return hexData;
+        return '0x' + Buffer.from(jsonString, 'utf8').toString('hex');
     }
 }
 

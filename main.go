@@ -106,17 +106,7 @@ func main() {
 
 	// Set up HTTP bridge URL only if not in subnet-only mode
 	if !subnetOnlyMode && coordinator.GraphAdapter != nil {
-		fmt.Println("🔗 Setting up per-epoch HTTP bridge integration...")
-
-		// Set the bridge URL for HTTP communication
 		coordinator.GraphAdapter.SetBridgeURL("http://localhost:3001")
-
-		fmt.Println("✅ Per-epoch HTTP bridge configured successfully")
-		fmt.Println("📡 Graph adapter will send HTTP requests to JavaScript bridge")
-	} else if subnetOnlyMode {
-		fmt.Println("🔹 Running in subnet-only mode - no blockchain integration")
-	} else {
-		fmt.Println("⚠️  GraphAdapter not available - running standard demo")
 	}
 
 	// validationOnlyMode already declared at the top

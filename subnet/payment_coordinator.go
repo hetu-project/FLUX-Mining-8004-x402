@@ -26,6 +26,7 @@ import (
 
 // PaymentCoordinator handles all x402 payment operations for the FLUX-Mining system.
 // It integrates with payment tokens (USDC/AIUSD) and x402PaymentEscrow contracts to facilitate gasless payments.
+// Supports both per-task payments and x402 V2 session-based payments (per-epoch).
 type PaymentCoordinator struct {
 	client          *ethclient.Client
 	auth            *bind.TransactOpts
@@ -38,10 +39,19 @@ type PaymentCoordinator struct {
 	clientKey       *ecdsa.PrivateKey  // Client's private key for signing transactions
 	clientAddr      common.Address      // Client's address
 	facilitatorURL  string // x402 facilitator service URL
-	paymentMode     string // direct, escrow, or hybrid
+	paymentMode     string // direct or session (x402 V2)
 
-	// Payment tracking
+	// Payment tracking (per-task)
 	payments map[string]*PaymentTracker // taskID -> payment details
+
+	// Session payment tracking (x402 V2)
+	useSessionPayments bool                       // Enable session-based payments
+	tasksPerSession    int                        // Tasks per session/epoch (default 3)
+	sessions           map[int]*SessionPayment    // epochNumber -> session payment
+
+	// Direct payment tracking (for tasks outside sessions)
+	directPaymentTotal int64 // Total direct payments in base units (e.g., USDC with 6 decimals)
+	directPaymentCount int   // Number of direct payments made
 }
 
 // PaymentTracker tracks the lifecycle of a payment
@@ -58,6 +68,49 @@ type PaymentTracker struct {
 	ConsensusReached bool
 	UserAccepted    bool
 	QualityScore    float64
+}
+
+// SessionPaymentStatus represents the status of a session payment
+type SessionPaymentStatus int
+
+const (
+	SessionPending   SessionPaymentStatus = iota // Session created, payment not yet deposited
+	SessionActive                                // Payment deposited, tasks running
+	SessionCompleted                             // All tasks done, payment released
+	SessionRefunded                              // Session failed, payment refunded
+)
+
+func (s SessionPaymentStatus) String() string {
+	switch s {
+	case SessionPending:
+		return "PENDING"
+	case SessionActive:
+		return "ACTIVE"
+	case SessionCompleted:
+		return "COMPLETED"
+	case SessionRefunded:
+		return "REFUNDED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// SessionPayment tracks payment for an entire epoch/session (x402 V2)
+type SessionPayment struct {
+	SessionID        string               // "session-epoch-1"
+	EpochNumber      int                  // Which epoch this session represents
+	ClientAddr       common.Address       // Client paying for the session
+	AgentAddr        common.Address       // Agent receiving payment
+	TotalAmount      *big.Int             // Total payment for session (e.g., 30 USDC)
+	AmountPerTask    *big.Int             // Amount per task (e.g., 10 USDC)
+	TasksInSession   []string             // Task IDs in this session
+	TasksPerEpoch    int                  // Number of tasks per epoch
+	Status           SessionPaymentStatus // Current session status
+	SessionStart     time.Time            // When session started
+	SessionExpiry    time.Time            // When session expires
+	AggregateQuality float64              // Weighted average quality score
+	TasksCompleted   int                  // Number of tasks completed
+	TasksApproved    int                  // Number of tasks approved
 }
 
 // ContractAddresses holds deployed contract addresses
@@ -116,10 +169,10 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 		facilitatorURL = "http://localhost:3002"
 	}
 
-	// Get payment mode from environment or use default
+	// Get payment mode from environment or use default (x402 V2: direct or session)
 	paymentMode := os.Getenv("PAYMENT_MODE")
 	if paymentMode == "" {
-		paymentMode = "hybrid" // Default to hybrid mode
+		paymentMode = "direct" // Default to direct mode
 	}
 
 	// Get client private key from environment for direct payment signing
@@ -145,6 +198,9 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 	}
 	clientAddr := crypto.PubkeyToAddress(*clientPublicKeyECDSA)
 
+	// Session payments enabled when paymentMode == "session"
+	tasksPerSession := 3 // Default: 3 tasks per epoch/session
+
 	pc := &PaymentCoordinator{
 		client:              client,
 		auth:                auth,
@@ -159,16 +215,16 @@ func NewPaymentCoordinator(rpcURL, contractAddressesFile, privateKeyHex string) 
 		facilitatorURL:      facilitatorURL,
 		paymentMode:         paymentMode,
 		payments:            make(map[string]*PaymentTracker),
+		useSessionPayments:  paymentMode == "session",
+		tasksPerSession:     tasksPerSession,
+		sessions:            make(map[int]*SessionPayment),
 	}
 
-	fmt.Printf("💳 Payment Coordinator initialized:\n")
-	fmt.Printf("   Chain ID: %s\n", chainID.String())
-	fmt.Printf("   Coordinator: %s\n", coordinatorAddr.Hex())
-	fmt.Printf("   Client: %s\n", clientAddr.Hex())
-	fmt.Printf("   Payment Token: %s (%s)\n", pc.paymentTokenName, pc.paymentTokenAddress.Hex())
-	fmt.Printf("   Escrow: %s\n", pc.escrowAddress.Hex())
-	fmt.Printf("   Facilitator: %s\n", facilitatorURL)
-	fmt.Printf("   Payment Mode: %s\n", paymentMode)
+	modeStr := paymentMode
+	if paymentMode == "session" {
+		modeStr = fmt.Sprintf("session (%d tasks/session)", tasksPerSession)
+	}
+	fmt.Printf("💳 Payments: %s via %s (%s)\n", pc.paymentTokenName, modeStr, facilitatorURL)
 
 	return pc, nil
 }
@@ -386,11 +442,7 @@ func (pc *PaymentCoordinator) SettlePaymentWithFacilitator(
 		return fmt.Errorf("settlement error: %s", result.Error)
 	}
 
-	fmt.Printf("✅ Payment settled via facilitator:\n")
-	fmt.Printf("   Scheme: %s\n", result.Scheme)
-	fmt.Printf("   Status: %s\n", result.Status)
-	fmt.Printf("   Transaction: %s\n", result.TransactionHash)
-	fmt.Printf("   Block: %d\n", result.BlockNumber)
+	fmt.Printf("✅ Payment: %s (%s)\n", result.Scheme, result.Status)
 
 	// Track the payment in the local map for later release/refund
 	taskIDBytes := [32]byte{}
@@ -434,48 +486,9 @@ func (pc *PaymentCoordinator) SettlePaymentWithFacilitator(
 	return nil
 }
 
-// GetPaymentScheme determines which payment scheme to use based on facilitator capabilities
+// GetPaymentScheme returns the payment scheme (always "direct" for x402 V2)
 func (pc *PaymentCoordinator) GetPaymentScheme() (string, error) {
-	if !pc.UseFacilitator() {
-		return "escrow", nil // Default to our escrow system if no facilitator
-	}
-
-	resp, err := http.Get(pc.facilitatorURL + "/payment-requirements")
-	if err != nil {
-		return "", fmt.Errorf("failed to get payment requirements: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var requirements struct {
-		X402Version int `json:"x402Version"`
-		Accepts     []struct {
-			Scheme string `json:"scheme"`
-		} `json:"accepts"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if err := json.Unmarshal(body, &requirements); err != nil {
-		return "", err
-	}
-
-	// Prefer escrow if available, otherwise use direct/exact
-	for _, accept := range requirements.Accepts {
-		if accept.Scheme == "escrow" {
-			return "escrow", nil
-		}
-	}
-
-	for _, accept := range requirements.Accepts {
-		if accept.Scheme == "exact" || accept.Scheme == "direct" {
-			return "exact", nil
-		}
-	}
-
-	return "", fmt.Errorf("no supported payment scheme found")
+	return "direct", nil
 }
 
 // DepositPayment deposits payment to escrow using standard transferFrom
@@ -557,10 +570,7 @@ func (pc *PaymentCoordinator) DepositPayment(
 		Deadline:    time.Unix(deadline.Int64(), 0),
 	}
 
-	fmt.Printf("💰 Payment deposited to escrow for task %s: %s %s\n", taskID, formatEther(amount), pc.paymentTokenName)
-	fmt.Printf("   Client: %s\n", clientAddr.Hex())
-	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
-	fmt.Printf("   Escrow TX: %s\n", signedTx.Hash().Hex())
+	fmt.Printf("💰 Escrow deposit: %s %s (tx: %s)\n", formatEther(amount), pc.paymentTokenName, signedTx.Hash().Hex()[:10]+"...")
 
 	return nil
 }
@@ -658,10 +668,7 @@ func (pc *PaymentCoordinator) DepositPaymentWithAuthorization(
 		Deadline:    time.Unix(validBefore.Int64(), 0),
 	}
 
-	fmt.Printf("💰 Payment deposited for task %s: %s %s\n", taskID, formatEther(amount), pc.paymentTokenName)
-	fmt.Printf("   Client: %s\n", clientAddr.Hex())
-	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
-	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
+	fmt.Printf("💰 Payment deposited: %s %s (tx: %s)\n", formatEther(amount), pc.paymentTokenName, signedTx.Hash().Hex()[:10]+"...")
 
 	return nil
 }
@@ -734,10 +741,7 @@ func (pc *PaymentCoordinator) ReleasePaymentDirectDemo(taskID string) error {
 	payment.Status = PaymentReleased
 	payment.ReleaseTime = time.Now()
 
-	fmt.Printf("💸 Payment released directly (demo mode): %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
-	fmt.Printf("   From: Coordinator %s\n", pc.auth.From.Hex())
-	fmt.Printf("   To: Agent %s\n", payment.Agent.Hex())
-	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
+	fmt.Printf("💸 Released: %s %s to agent (tx: %s)\n", formatEther(payment.Amount), pc.paymentTokenName, signedTx.Hash().Hex()[:10]+"...")
 
 	return nil
 }
@@ -751,23 +755,17 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 
 	// Handle different payment statuses
 	if payment.Status == PaymentCompleted {
-		// Legacy direct payment - already completed
-		fmt.Printf("ℹ️  Payment for task %s is already completed (direct payment)\n", taskID)
-		fmt.Printf("   Agent %s already received %s %s\n",
-			payment.Agent.Hex(), formatEther(payment.Amount), pc.paymentTokenName)
+		fmt.Printf("ℹ️  Payment %s already completed\n", taskID)
 		return nil
 	}
 
 	// For pending direct payments, finalize the transaction (broadcast to blockchain)
 	if payment.Status == PaymentPending {
 		if pc.UseFacilitator() {
-			fmt.Printf("📡 Finalizing direct payment via x402 Facilitator...\n")
-
-			// Call facilitator's /direct/finalize endpoint to broadcast transaction
 			finalizeReq := map[string]interface{}{
 				"taskId":   taskID,
 				"approved": true,
-				"validatorApprovals": []string{"validator-1", "validator-2"},  // TODO: Get actual approvals
+				"validatorApprovals": []string{"validator-1", "validator-2"},
 			}
 
 			reqBody, _ := json.Marshal(finalizeReq)
@@ -786,19 +784,18 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 				return fmt.Errorf("finalization failed: %s", string(body))
 			}
 
-			// Parse the response to get transaction hash
 			body, _ := io.ReadAll(resp.Body)
 			var result struct {
 				TransactionHash string `json:"transactionHash"`
 				BlockNumber     int64  `json:"blockNumber"`
 				Status          string `json:"status"`
 			}
-			if err := json.Unmarshal(body, &result); err == nil && result.TransactionHash != "" {
-				fmt.Printf("✅ Direct payment finalized and broadcast to blockchain\n")
-				fmt.Printf("   Transaction: %s\n", result.TransactionHash)
-			} else {
-				fmt.Printf("✅ Direct payment finalized and broadcast to blockchain\n")
+			json.Unmarshal(body, &result)
+			txShort := "pending"
+			if result.TransactionHash != "" && len(result.TransactionHash) > 10 {
+				txShort = result.TransactionHash[:10] + "..."
 			}
+			fmt.Printf("✅ Direct payment finalized (tx: %s)\n", txShort)
 			payment.Status = PaymentCompleted
 			return nil
 		}
@@ -810,10 +807,7 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 
 	// Check if we should use facilitator service for release
 	if pc.UseFacilitator() {
-		fmt.Printf("📡 Using x402 Facilitator to release payment...\n")
-
-		// Create validator approvals (in production, would gather real signatures)
-		validatorApprovals := []string{"validator1-approved"} // Simplified for demo
+		validatorApprovals := []string{"validator1-approved"}
 
 		reqBody := map[string]interface{}{
 			"taskId":             taskID,
@@ -857,11 +851,12 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 			return fmt.Errorf("release error: %s", result.Error)
 		}
 
-		fmt.Printf("✅ Payment released via facilitator:\n")
-		fmt.Printf("   Transaction: %s\n", result.TransactionHash)
-		fmt.Printf("   Block: %d\n", result.BlockNumber)
+		txShort := "pending"
+		if result.TransactionHash != "" && len(result.TransactionHash) > 10 {
+			txShort = result.TransactionHash[:10] + "..."
+		}
+		fmt.Printf("✅ Released via facilitator (block %d, tx: %s)\n", result.BlockNumber, txShort)
 
-		// Update payment status
 		payment.Status = PaymentReleased
 		payment.ReleaseTime = time.Now()
 
@@ -916,9 +911,7 @@ func (pc *PaymentCoordinator) ReleasePayment(taskID string) error {
 	// Update payment status
 	payment.Status = PaymentReleased
 
-	fmt.Printf("✅ Payment released for task %s\n", taskID)
-	fmt.Printf("   Agent received: %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
-	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
+	fmt.Printf("✅ Released: %s %s (tx: %s)\n", formatEther(payment.Amount), pc.paymentTokenName, signedTx.Hash().Hex()[:10]+"...")
 
 	return nil
 }
@@ -939,9 +932,7 @@ func (pc *PaymentCoordinator) RefundPaymentDirectDemo(taskID string) error {
 	payment.Status = PaymentRefunded
 	payment.RefundTime = time.Now()
 
-	fmt.Printf("↩️  Payment refunded (demo mode): %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
-	fmt.Printf("   Client: %s\n", payment.Client.Hex())
-	fmt.Printf("   (No transfer needed - coordinator retains funds)\n")
+	fmt.Printf("↩️  Refunded (demo): %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
 
 	return nil
 }
@@ -955,23 +946,16 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 
 	// Handle different payment statuses
 	if payment.Status == PaymentCompleted {
-		// Legacy direct payment - already completed, cannot refund
-		fmt.Printf("⚠️  Cannot refund task %s - direct payment already completed\n", taskID)
-		fmt.Printf("   Agent %s has already received %s %s\n",
-			payment.Agent.Hex(), formatEther(payment.Amount), pc.paymentTokenName)
-		fmt.Printf("   Manual intervention required for refund in direct payment mode\n")
+		fmt.Printf("⚠️  Cannot refund %s - already completed\n", taskID)
 		return fmt.Errorf("cannot refund completed direct payment")
 	}
 
 	// For pending direct payments, discard the transaction (don't broadcast)
 	if payment.Status == PaymentPending {
 		if pc.UseFacilitator() {
-			fmt.Printf("📡 Discarding pending direct payment via x402 Facilitator...\n")
-
-			// Call facilitator's /direct/finalize endpoint with approved=false
 			finalizeReq := map[string]interface{}{
 				"taskId":   taskID,
-				"approved": false,  // Reject the payment
+				"approved": false,
 				"validatorApprovals": []string{},
 			}
 
@@ -991,7 +975,7 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 				return fmt.Errorf("discard failed: %s", string(body))
 			}
 
-			fmt.Printf("✅ Direct payment discarded - no funds transferred\n")
+			fmt.Printf("✅ Payment discarded\n")
 			payment.Status = PaymentRefunded
 			return nil
 		}
@@ -1003,8 +987,6 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 
 	// If using facilitator, route through it
 	if pc.UseFacilitator() {
-		fmt.Println("📡 Using x402 Facilitator to refund payment...")
-
 		refundRequest := map[string]interface{}{
 			"taskId": taskID,
 			"reason": "User rejected or low quality",
@@ -1044,11 +1026,12 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 			return fmt.Errorf("failed to parse refund response: %w", err)
 		}
 
-		fmt.Printf("✅ Payment refunded via facilitator:\n")
-		fmt.Printf("   Transaction: %s\n", refundResp.TransactionHash)
-		fmt.Printf("   Block: %d\n", refundResp.BlockNumber)
+		txShort := "pending"
+		if refundResp.TransactionHash != "" && len(refundResp.TransactionHash) > 10 {
+			txShort = refundResp.TransactionHash[:10] + "..."
+		}
+		fmt.Printf("↩️  Refunded via facilitator (block %d, tx: %s)\n", refundResp.BlockNumber, txShort)
 
-		// Update payment status
 		payment.Status = PaymentRefunded
 
 		return nil
@@ -1101,10 +1084,84 @@ func (pc *PaymentCoordinator) RefundPayment(taskID string) error {
 	// Update payment status
 	payment.Status = PaymentRefunded
 
-	fmt.Printf("↩️  Payment refunded for task %s\n", taskID)
-	fmt.Printf("   Client received: %s %s\n", formatEther(payment.Amount), pc.paymentTokenName)
-	fmt.Printf("   TX: %s\n", signedTx.Hash().Hex())
+	fmt.Printf("↩️  Refunded: %s %s (tx: %s)\n", formatEther(payment.Amount), pc.paymentTokenName, signedTx.Hash().Hex()[:10]+"...")
 
+	return nil
+}
+
+// ReleasePartialPayment releases payment for approved tasks only (partial session payment)
+func (pc *PaymentCoordinator) ReleasePartialPayment(sessionID string, approvedTasks, totalTasks int) error {
+	payment, exists := pc.payments[sessionID]
+	if !exists {
+		// For session payments, try to release via facilitator directly
+		if pc.UseFacilitator() {
+			fmt.Printf("📡 Releasing partial payment via x402 Facilitator...\n")
+			fmt.Printf("   Approved tasks: %d/%d\n", approvedTasks, totalTasks)
+
+			releaseReq := map[string]interface{}{
+				"taskId":        sessionID,
+				"approvedTasks": approvedTasks,
+				"totalTasks":    totalTasks,
+				"partial":       true,
+			}
+
+			jsonData, err := json.Marshal(releaseReq)
+			if err != nil {
+				return err
+			}
+
+			resp, err := http.Post(pc.facilitatorURL+"/direct/finalize", "application/json", bytes.NewBuffer(jsonData))
+			if err != nil {
+				return fmt.Errorf("failed to release partial payment: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("partial release failed: %s", string(body))
+			}
+
+			fmt.Printf("✅ Partial payment released for %d/%d approved tasks\n", approvedTasks, totalTasks)
+			return nil
+		}
+		return fmt.Errorf("payment not found for session %s", sessionID)
+	}
+
+	// Calculate partial amount
+	amountPerTask := new(big.Int).Div(payment.Amount, big.NewInt(int64(totalTasks)))
+	partialAmount := new(big.Int).Mul(amountPerTask, big.NewInt(int64(approvedTasks)))
+
+	fmt.Printf("📡 Releasing partial payment: %s %s (%d/%d tasks)\n",
+		formatEther(partialAmount), pc.paymentTokenName, approvedTasks, totalTasks)
+
+	// For facilitator-based payments
+	if pc.UseFacilitator() && payment.Status == PaymentPending {
+		releaseReq := map[string]interface{}{
+			"taskId":        sessionID,
+			"approved":      true,
+			"approvedTasks": approvedTasks,
+			"totalTasks":    totalTasks,
+			"partial":       true,
+		}
+
+		jsonData, _ := json.Marshal(releaseReq)
+		resp, err := http.Post(pc.facilitatorURL+"/direct/finalize", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("partial release failed: %s", string(body))
+		}
+
+		payment.Status = PaymentCompleted
+		fmt.Printf("✅ Partial payment completed\n")
+		return nil
+	}
+
+	payment.Status = PaymentCompleted
 	return nil
 }
 
@@ -1151,11 +1208,7 @@ func (pc *PaymentCoordinator) InitializePaymentForDemo(taskID string, clientAddr
 		Deadline:    time.Now().Add(1 * time.Hour),
 	}
 
-	fmt.Printf("💰 Demo payment initialized for task %s\n", taskID)
-	fmt.Printf("   Client: %s\n", clientAddr.Hex())
-	fmt.Printf("   Agent: %s\n", agentAddr.Hex())
-	fmt.Printf("   Amount: %s %s\n", formatEther(amount), pc.paymentTokenName)
-	fmt.Printf("   (Note: Blockchain deposit requires client signature - skipped for demo)\n")
+	fmt.Printf("💰 Demo payment: %s %s for task %s\n", formatEther(amount), pc.paymentTokenName, taskID)
 }
 
 func (pc *PaymentCoordinator) GetPaymentStatus(taskID string) *PaymentTracker {
@@ -1170,7 +1223,7 @@ func (pc *PaymentCoordinator) GetPaymentTokenName() string {
 	return pc.paymentTokenName
 }
 
-// GetPaymentMode returns the configured payment mode (direct, escrow, or hybrid)
+// GetPaymentMode returns the configured payment mode (direct or session)
 func (pc *PaymentCoordinator) GetPaymentMode() string {
 	return pc.paymentMode
 }
@@ -1178,6 +1231,24 @@ func (pc *PaymentCoordinator) GetPaymentMode() string {
 // VerifyPaymentLocked verifies that payment is locked in escrow on-chain before agent processes task
 // This provides cryptographic proof that funds are secured, enabling trustless agent operation
 func (pc *PaymentCoordinator) VerifyPaymentLocked(taskID string, agentAddr common.Address, minAmount *big.Int) (bool, error) {
+	// SESSION MODE: Check if task is part of an active session
+	if pc.useSessionPayments {
+		for _, session := range pc.sessions {
+			if session.Status == SessionActive || session.Status == SessionPending {
+				for _, t := range session.TasksInSession {
+					if t == taskID {
+						// Verify agent address matches
+						if session.AgentAddr != agentAddr {
+							return false, fmt.Errorf("session agent %s doesn't match expected %s", session.AgentAddr.Hex(), agentAddr.Hex())
+						}
+						return true, nil
+					}
+				}
+			}
+		}
+		// In session mode but task not in any session - might be standalone, fall through to check payments
+	}
+
 	// First check local payment tracker (for direct payments or facilitator payments)
 	if trackedPayment, exists := pc.payments[taskID]; exists {
 		// Verify the payment status is valid (deposited for escrow, pending/completed for direct)
@@ -1197,25 +1268,6 @@ func (pc *PaymentCoordinator) VerifyPaymentLocked(taskID string, agentAddr commo
 			return false, fmt.Errorf("payment amount %s is less than minimum %s", formatEther(trackedPayment.Amount), formatEther(minAmount))
 		}
 
-		paymentType := "in escrow"
-		if trackedPayment.Status == PaymentCompleted {
-			paymentType = "direct payment"
-		}
-
-		fmt.Printf("✅ Payment verified for task %s:\n", taskID)
-		fmt.Printf("   Amount: %s %s (%s)\n", formatEther(trackedPayment.Amount), pc.paymentTokenName, paymentType)
-		fmt.Printf("   Agent: %s\n", agentAddr.Hex())
-		fmt.Printf("   Client: %s\n", trackedPayment.Client.Hex())
-
-		// For direct payments that are already completed, deadline check is not needed
-		if trackedPayment.Status == PaymentCompleted {
-			fmt.Printf("   Status: Payment already transferred to agent\n")
-			return true, nil
-		}
-
-		// For escrow payments, check deadline
-		deadline := trackedPayment.DepositTime.Add(1 * time.Hour)
-		fmt.Printf("   Deadline: %v\n", deadline.Format(time.RFC3339))
 		return true, nil
 	}
 
@@ -1297,12 +1349,6 @@ func (pc *PaymentCoordinator) VerifyPaymentLocked(taskID string, agentAddr commo
 	if payment.Deadline.Cmp(currentTime) <= 0 {
 		return false, fmt.Errorf("payment deadline has passed")
 	}
-
-	fmt.Printf("✅ Payment verified for task %s:\n", taskID)
-	fmt.Printf("   Amount: %s %s (locked in escrow)\n", formatEther(payment.Amount), pc.paymentTokenName)
-	fmt.Printf("   Agent: %s\n", payment.Agent.Hex())
-	fmt.Printf("   Client: %s\n", payment.Client.Hex())
-	fmt.Printf("   Deadline: %s\n", time.Unix(payment.Deadline.Int64(), 0).Format(time.RFC3339))
 
 	return true, nil
 }
@@ -1504,4 +1550,214 @@ func RandomNonce() [32]byte {
 	crypto.Keccak256([]byte(fmt.Sprintf("%d", time.Now().UnixNano())), randomBytes)
 	copy(nonce[:], randomBytes)
 	return nonce
+}
+
+// ============================================================================
+// SESSION PAYMENT METHODS (x402 V2)
+// ============================================================================
+
+// IsSessionMode returns true if using session-based payments
+func (pc *PaymentCoordinator) IsSessionMode() bool {
+	return pc.useSessionPayments
+}
+
+// GetTasksPerSession returns the number of tasks per session/epoch
+func (pc *PaymentCoordinator) GetTasksPerSession() int {
+	return pc.tasksPerSession
+}
+
+// ShouldStartSession returns true if this task number starts a new session
+// Task 1 starts session 1, task 4 starts session 2, etc.
+func (pc *PaymentCoordinator) ShouldStartSession(taskNumber int) bool {
+	if !pc.useSessionPayments {
+		return false
+	}
+	return (taskNumber-1)%pc.tasksPerSession == 0
+}
+
+// ShouldFinalizeSession returns true if this task number ends a session
+// Task 3 ends session 1, task 6 ends session 2, etc.
+func (pc *PaymentCoordinator) ShouldFinalizeSession(taskNumber int) bool {
+	if !pc.useSessionPayments {
+		return false
+	}
+	return taskNumber%pc.tasksPerSession == 0
+}
+
+// GetEpochForTask returns the epoch number for a given task (1-indexed)
+func (pc *PaymentCoordinator) GetEpochForTask(taskNumber int) int {
+	return (taskNumber-1)/pc.tasksPerSession + 1
+}
+
+// IsStandaloneTask returns true if this task is outside complete epochs
+// e.g., task 7 when we have 7 total tasks (2 complete epochs of 3 + 1 standalone)
+func (pc *PaymentCoordinator) IsStandaloneTask(taskNumber, totalTasks int) bool {
+	if !pc.useSessionPayments {
+		return true // All tasks are standalone in per-task mode
+	}
+	completeEpochs := totalTasks / pc.tasksPerSession
+	tasksInCompleteEpochs := completeEpochs * pc.tasksPerSession
+	return taskNumber > tasksInCompleteEpochs
+}
+
+// StartSession initiates a session payment for an epoch
+func (pc *PaymentCoordinator) StartSession(epochNumber int, clientAddr, agentAddr common.Address) error {
+	sessionID := fmt.Sprintf("session-epoch-%d", epochNumber)
+
+	// Calculate payment: 10 USDC per task × tasks per session
+	amountPerTask := big.NewInt(10_000_000) // 10 USDC (6 decimals)
+	totalAmount := new(big.Int).Mul(amountPerTask, big.NewInt(int64(pc.tasksPerSession)))
+
+	session := &SessionPayment{
+		SessionID:      sessionID,
+		EpochNumber:    epochNumber,
+		ClientAddr:     clientAddr,
+		AgentAddr:      agentAddr,
+		TotalAmount:    totalAmount,
+		AmountPerTask:  amountPerTask,
+		TasksInSession: make([]string, 0, pc.tasksPerSession),
+		TasksPerEpoch:  pc.tasksPerSession,
+		Status:         SessionPending,
+		SessionStart:   time.Now(),
+		SessionExpiry:  time.Now().Add(1 * time.Hour),
+	}
+
+	fmt.Printf("\n💰 Session %d starting: %d %s for %d tasks\n", epochNumber, pc.tasksPerSession*10, pc.paymentTokenName, pc.tasksPerSession)
+
+	// Deposit session payment using direct/exact scheme (session payments don't use escrow)
+	if pc.UseFacilitator() {
+		amountHuman := fmt.Sprintf("%d", totalAmount.Int64()/1_000_000)
+		// Session payments use "exact" scheme - direct payment, no escrow
+		err := pc.SettlePaymentWithFacilitator(sessionID, clientAddr, agentAddr, amountHuman, "exact")
+		if err != nil {
+			return fmt.Errorf("failed to deposit session payment: %w", err)
+		}
+	} else {
+		// Fallback: direct deposit to escrow contract
+		err := pc.DepositPayment(sessionID, clientAddr, agentAddr, totalAmount)
+		if err != nil {
+			return fmt.Errorf("failed to deposit session payment: %w", err)
+		}
+	}
+
+	session.Status = SessionActive
+	pc.sessions[epochNumber] = session
+
+	return nil
+}
+
+// AddTaskToSession tracks a task within the current session
+func (pc *PaymentCoordinator) AddTaskToSession(epochNumber int, taskID string) {
+	session, exists := pc.sessions[epochNumber]
+	if !exists || session.Status != SessionActive {
+		return
+	}
+	session.TasksInSession = append(session.TasksInSession, taskID)
+}
+
+// UpdateSessionTaskResult updates session with task quality result
+func (pc *PaymentCoordinator) UpdateSessionTaskResult(epochNumber int, approved bool, qualityScore float64) {
+	session, exists := pc.sessions[epochNumber]
+	if !exists {
+		return
+	}
+	session.TasksCompleted++
+	if approved {
+		session.TasksApproved++
+	}
+	// Running weighted average
+	if session.TasksCompleted == 1 {
+		session.AggregateQuality = qualityScore
+	} else {
+		session.AggregateQuality = (session.AggregateQuality*float64(session.TasksCompleted-1) + qualityScore) / float64(session.TasksCompleted)
+	}
+}
+
+// FinalizeSession settles payment based on approved tasks (partial payment)
+func (pc *PaymentCoordinator) FinalizeSession(epochNumber int) error {
+	session, exists := pc.sessions[epochNumber]
+	if !exists {
+		return fmt.Errorf("session %d not found", epochNumber)
+	}
+	if session.Status != SessionActive {
+		return fmt.Errorf("session %d not active (status: %s)", epochNumber, session.Status)
+	}
+
+	// Calculate partial payment: pay only for approved tasks
+	amountPerTask := session.AmountPerTask.Int64() / 1_000_000 // Convert to USDC units
+	approvedPayment := amountPerTask * int64(session.TasksApproved)
+	refundAmount := amountPerTask * int64(session.TasksCompleted-session.TasksApproved)
+
+	fmt.Printf("\n📊 Session %d: %d/%d approved, %d %s paid, %d %s refund\n",
+		epochNumber, session.TasksApproved, session.TasksCompleted, approvedPayment, pc.paymentTokenName, refundAmount, pc.paymentTokenName)
+
+	if session.TasksApproved > 0 {
+		// Partial release: pay for approved tasks only
+		err := pc.ReleasePartialPayment(session.SessionID, session.TasksApproved, session.TasksCompleted)
+		if err != nil {
+			return err
+		}
+		session.Status = SessionCompleted
+	} else {
+		// Full refund: no approved tasks
+		err := pc.RefundPayment(session.SessionID)
+		if err != nil {
+			return err
+		}
+		session.Status = SessionRefunded
+	}
+
+	return nil
+}
+
+// GetSession returns the session for a given epoch
+func (pc *PaymentCoordinator) GetSession(epochNumber int) *SessionPayment {
+	return pc.sessions[epochNumber]
+}
+
+// PrintSessionSummary prints a summary of all sessions
+func (pc *PaymentCoordinator) PrintSessionSummary() {
+	if !pc.useSessionPayments && pc.directPaymentCount == 0 {
+		return
+	}
+
+	fmt.Printf("\n💰 Payment Summary:\n")
+
+	var totalPaid, totalRefunded int64
+
+	// Session payments
+	for i := 1; i <= len(pc.sessions); i++ {
+		session := pc.sessions[i]
+		if session == nil {
+			continue
+		}
+		amountPerTask := session.AmountPerTask.Int64() / 1_000_000
+		paidAmount := amountPerTask * int64(session.TasksApproved)
+		refundedAmount := amountPerTask * int64(session.TasksCompleted-session.TasksApproved)
+
+		switch session.Status {
+		case SessionCompleted:
+			totalPaid += paidAmount
+			totalRefunded += refundedAmount
+			fmt.Printf("   Session %d: %d %s (%d/%d approved)\n",
+				i, paidAmount, pc.paymentTokenName, session.TasksApproved, session.TasksCompleted)
+		case SessionRefunded:
+			totalRefunded += session.TotalAmount.Int64() / 1_000_000
+			fmt.Printf("   Session %d: REFUNDED\n", i)
+		case SessionActive:
+			fmt.Printf("   Session %d: ACTIVE\n", i)
+		}
+	}
+
+	// Direct payments
+	if pc.directPaymentCount > 0 {
+		directTotal := pc.directPaymentTotal / 1_000_000
+		totalPaid += directTotal
+		fmt.Printf("   Direct: %d %s (%d tasks)\n",
+			directTotal, pc.paymentTokenName, pc.directPaymentCount)
+	}
+
+	fmt.Printf("   ─────────────────────────────\n")
+	fmt.Printf("   Total: %d %s paid, %d %s refunded\n",
+		totalPaid, pc.paymentTokenName, totalRefunded, pc.paymentTokenName)
 }

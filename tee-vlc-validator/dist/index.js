@@ -15,23 +15,13 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 }) : function(o, v) {
     o["default"] = v;
 });
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -52,10 +42,10 @@ const wallet = ethers_1.ethers.Wallet.fromPhrase(MNEMONIC).connect(provider);
 console.log('🔐 TEE VLC Validator Initializing...');
 console.log(`   TEE Wallet: ${wallet.address}`);
 console.log(`   Network: ${RPC_URL.includes('sepolia') ? 'Sepolia' : 'Mainnet'}`);
-// ValidationRegistry ABI
+// ValidationRegistry ABI (ERC-8004 v1.0 - string tags)
 const VALIDATION_ABI = [
-    "function validationRequest(address validator, uint256 agentId, string description, bytes32 requestHash)",
-    "function validationResponse(bytes32 requestHash, uint8 score, string feedback, bytes32 responseHash, bytes32 tag)"
+    "function validationRequest(address validator, uint256 agentId, string requestURI, bytes32 requestHash)",
+    "function validationResponse(bytes32 requestHash, uint8 response, string responseURI, bytes32 responseHash, string tag)"
 ];
 const validationRegistry = new ethers_1.ethers.Contract(VALIDATION_REGISTRY_ADDRESS, VALIDATION_ABI, wallet);
 /**

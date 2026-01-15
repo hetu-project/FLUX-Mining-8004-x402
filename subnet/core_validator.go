@@ -203,9 +203,6 @@ func (v *CoreValidator) VoteOnOutput(response *MinerResponseMessage) *ValidatorV
 	assessment := v.assessments[response.RequestID]
 	assessment.AddVote(v.Weight, accept)
 
-	fmt.Printf("Validator %s: Voted on Request %s - Accept: %t, Quality: %.2f\n",
-		v.ID, response.RequestID, accept, quality)
-
 	return vote
 }
 

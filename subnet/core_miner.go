@@ -149,9 +149,8 @@ func (m *CoreMiner) ProcessInput(input string, inputNumber int, requestID string
 				Output:      fmt.Sprintf("PAYMENT_VERIFICATION_FAILED: %v", err),
 			}
 		}
-		fmt.Printf("🔐 Miner %s: Payment verified by facilitator - proceeding with task\n", m.ID)
 	} else if isVLCValidation {
-		fmt.Printf("🔓 Miner %s: VLC validation request detected - skipping payment verification\n", m.ID)
+		// VLC validation doesn't require payment
 	}
 
 	// VLC Protocol: +1 for message entering from validator

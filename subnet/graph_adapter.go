@@ -127,24 +127,11 @@ func (sga *SubnetGraphAdapter) sendEpochToBridge(epochData *EpochData) error {
 		"timestamp":      time.Now().Unix(),
 	}
 	
-	// Debug log the detailed rounds being sent
-	fmt.Printf("🔍 DEBUG - Sending %d detailed rounds to bridge:\n", len(epochData.DetailedRounds))
-	for i, round := range epochData.DetailedRounds {
-		inputPreview := round.UserInput
-		if len(inputPreview) > 40 {
-			inputPreview = inputPreview[:40] + "..."
-		}
-		fmt.Printf("   Round %d: %s (Success: %t)\n", i+1, inputPreview, round.Success)
-	}
-
 	// Convert to JSON
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal epoch data: %v", err)
 	}
-	
-	// Debug: Print summary of payload
-	fmt.Printf("📤 Sending epoch data: %d detailed rounds, %d bytes\n", len(epochData.DetailedRounds), len(jsonPayload))
 
 	// Create HTTP request
 	req, err := http.NewRequest("POST", sga.bridgeURL+"/submit-epoch", bytes.NewBuffer(jsonPayload))
@@ -170,7 +157,6 @@ func (sga *SubnetGraphAdapter) sendEpochToBridge(epochData *EpochData) error {
 		return fmt.Errorf("bridge returned error status: %d", resp.StatusCode)
 	}
 
-	fmt.Printf("✅ Epoch %d data sent to bridge successfully (Status: %d)\n", epochData.EpochNumber, resp.StatusCode)
 	return nil
 }
 
@@ -348,7 +334,7 @@ func (sga *SubnetGraphAdapter) TrackRoundComplete(requestID string, roundNum int
 		round.UserFeedback = userFeedback
 		round.UserAccept = userAccept
 		round.FinalResult = finalResult
-		round.Success = userAccept && finalResult == "OUTPUT DELIVERED TO USER"
+		round.Success = userAccept && finalResult == "DELIVERED"
 		// Final VLC state update
 		for k, v := range vlcToMap(validatorClock) {
 			round.VLCClockState[k] = v
@@ -357,7 +343,7 @@ func (sga *SubnetGraphAdapter) TrackRoundComplete(requestID string, roundNum int
 
 	// Determine semantic event name based on final outcome
 	var eventName string
-	if userAccept && finalResult == "OUTPUT DELIVERED TO USER" {
+	if userAccept && finalResult == "DELIVERED" {
 		eventName = "RoundSuccess" // Will be colored green
 	} else {
 		eventName = "RoundFailed" // Will be colored red
@@ -461,41 +447,26 @@ func (sga *SubnetGraphAdapter) createEpochFinalization(validatorClock *vlc.Clock
 		// Copy completed rounds for this epoch (last 3 rounds)
 		copy(epochData.CompletedRounds, sga.completedRounds)
 		
-		// IMPORTANT: Copy detailed round data BEFORE clearing currentRounds
-		fmt.Printf("🔍 DEBUG - Current rounds in memory: %d\n", len(sga.currentRounds))
-		for requestID, roundData := range sga.currentRounds {
+		// Copy detailed round data BEFORE clearing currentRounds
+		for _, roundData := range sga.currentRounds {
 			if roundData != nil {
-				// Create a copy of the round data
 				epochData.DetailedRounds = append(epochData.DetailedRounds, *roundData)
-				inputPreview := roundData.UserInput
-				if len(inputPreview) > 50 {
-					inputPreview = inputPreview[:50] + "..."
-				}
-				fmt.Printf("📋 Including round %d data for request %s: %s (Success: %t)\n", roundData.RoundNumber, requestID, inputPreview, roundData.Success)
 			}
 		}
-		fmt.Printf("🔍 DEBUG - Copied %d detailed rounds to epochData\n", len(epochData.DetailedRounds))
 		
 		// Copy VLC clock state
 		for nodeID, value := range validatorClock.Values {
 			epochData.VLCClockState[int(nodeID)] = int(value)
 		}
 		
-		fmt.Printf("🚀 Epoch %d finalized - triggering mainnet submission\n", sga.epochCount)
-
 		// Send epoch data to JavaScript bridge synchronously
 		// This ensures epoch data submission completes BEFORE reputation feedback starts
 		// Try HTTP bridge first if URL is set
 		if sga.bridgeURL != "" {
-			fmt.Printf("📡 Sending Epoch %d data to JavaScript bridge...\n", epochData.EpochNumber)
-			if err := sga.sendEpochToBridge(epochData); err != nil {
-				fmt.Printf("❌ Failed to send epoch data to bridge: %v\n", err)
+				if err := sga.sendEpochToBridge(epochData); err != nil {
 				if sga.epochCallback != nil {
-					fmt.Printf("🔄 Falling back to callback method...\n")
 					sga.epochCallback(sga.epochCount, sga.SubnetID, epochData)
 				}
-			} else {
-				fmt.Printf("✅ Epoch %d data submitted to mainnet via bridge!\n", epochData.EpochNumber)
 			}
 		} else if sga.epochCallback != nil {
 			// Use callback method if no bridge URL
@@ -557,24 +528,5 @@ func (sga *SubnetGraphAdapter) PrintGraphSummary() {
 	sga.mu.RLock()
 	defer sga.mu.RUnlock()
 
-	fmt.Printf("\n=== Subnet Graph Summary ===\n")
-	fmt.Printf("Subnet ID: %s\n", sga.SubnetID)
-	fmt.Printf("Total Events: %d\n", len(sga.EventGraph.Events))
-	fmt.Printf("Requests Processed: %d\n", len(sga.roundCounters))
-	
-	// Print event breakdown by type
-	eventTypes := make(map[string]int)
-	for _, event := range sga.EventGraph.Events {
-		eventTypes[event.Name]++
-	}
-	
-	fmt.Printf("\nEvent Type Breakdown:\n")
-	for eventType, count := range eventTypes {
-		fmt.Printf("  %s: %d\n", eventType, count)
-	}
-	
-	fmt.Printf("\nRound Counters:\n")
-	for requestID, rounds := range sga.roundCounters {
-		fmt.Printf("  %s: %d rounds\n", requestID, rounds)
-	}
+	fmt.Printf("📊 Graph: %d events, %d requests\n", len(sga.EventGraph.Events), len(sga.roundCounters))
 }

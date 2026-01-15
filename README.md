@@ -116,7 +116,7 @@ FLUX Mining enables **Intelligence Money** through permissionless agentic coordi
 
 ✅ **ERC-8004 Identity System** - NFT-based agent identities
 ✅ **VLC Protocol Validation** - Ensures causal consistency (TEE-enabled with Intel TDX)
-✅ **x402 Payment Protocol** - HTTP-based payment standard (direct/escrow/hybrid)
+✅ **x402 Payment Protocol** - HTTP-based payment standard (direct/session)
 ✅ **BFT Consensus** - Byzantine fault-tolerant quality assessment
 ✅ **Reputation Tracking** - On-chain performance history
 ✅ **IPFS Storage (Optional)** - 95% cost reduction via Pinata
@@ -131,7 +131,7 @@ FLUX Mining enables **Intelligence Money** through permissionless agentic coordi
 | **ERC-8004** | Trustless agent identity, validation and reputation system | [Identity](docs/erc-8004-identity.md) / [Reputation](docs/reputation.md) |
 | **VLC Validation** | Causal consistency protocol compliance | [Validation Guide](docs/vlc-validation.md) |
 | **TEE Validation** | Hardware-guaranteed validation with Intel TDX (optional) | [TEE Guide](tee-vlc-validator/README.md) |
-| **x402 Payments** | HTTP 402 payment protocol (direct/escrow/hybrid) | [Payment System](docs/x402-payments.md) |
+| **x402 Payments** | HTTP 402 payment protocol (direct/session) | [Payment System](docs/x402-payments.md) |
 | **FLUX Mining** | Intelligence-based token mining | [Mining Guide](docs/flux-mining.md) |
 | **IPFS Storage** | Off-chain VLC data storage (optional) | [IPFS Guide](docs/ipfs-storage.md) |
 
@@ -242,7 +242,7 @@ Client → Deposit USDC → Escrow Contract → Agent Verifies → Task Processi
 
 ### Key Parameters
 ```bash
-PAYMENT_MODE=direct|escrow|hybrid  # Payment processing mode (default: direct)
+PAYMENT_MODE=direct|session        # Payment processing mode (default: direct)
 NETWORK=local|sepolia              # Blockchain network (default: local)
 RPC_URL=<your-rpc-endpoint>        # Ethereum RPC endpoint
 USE_PINATA=true|false              # Enable IPFS storage (see Quick Start section)

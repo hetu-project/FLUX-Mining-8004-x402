@@ -20,10 +20,10 @@ console.log('🔐 TEE VLC Validator Initializing...');
 console.log(`   TEE Wallet: ${wallet.address}`);
 console.log(`   Network: ${RPC_URL.includes('sepolia') ? 'Sepolia' : 'Mainnet'}`);
 
-// ValidationRegistry ABI
+// ValidationRegistry ABI (ERC-8004 v1.0 - string tags)
 const VALIDATION_ABI = [
-  "function validationRequest(address validator, uint256 agentId, string description, bytes32 requestHash)",
-  "function validationResponse(bytes32 requestHash, uint8 score, string feedback, bytes32 responseHash, bytes32 tag)"
+  "function validationRequest(address validator, uint256 agentId, string requestURI, bytes32 requestHash)",
+  "function validationResponse(bytes32 requestHash, uint8 response, string responseURI, bytes32 responseHash, string tag)"
 ];
 
 const validationRegistry = new ethers.Contract(

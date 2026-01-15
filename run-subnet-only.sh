@@ -150,10 +150,7 @@ echo ""
 # Set environment variable to disable bridge (subnet-only mode)
 export SUBNET_ONLY_MODE=true
 
-echo "🎯 Demo Flow:"
-echo "  Round 1-3  → Epoch 1 → Immediate mainnet submission"
-echo "  Round 4-6  → Epoch 2 → Immediate mainnet submission"
-echo "  Round 7    → Partial Epoch 3 → Submit at demo end"
+echo "🚀 Starting demo: 7 rounds → 2 epochs + 1 partial"
 echo ""
 
 # Run the Go subnet system (include agent_http_server.go for TEE validation support)

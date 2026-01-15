@@ -8,7 +8,7 @@ interface IIdentityRegistry {
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
-// Interface for ERC-8004 ValidationRegistry
+// Interface for ERC-8004 ValidationRegistry (v1.0 - string tags)
 interface IValidationRegistry {
     function getAgentValidations(uint256 agentId) external view returns (bytes32[] memory);
     function getValidationStatus(bytes32 requestHash) external view returns (
@@ -16,10 +16,11 @@ interface IValidationRegistry {
         uint256 agentId,
         uint8 score,
         bytes32 responseHash,
-        bytes32 tag,
-        uint256 timestamp
+        string memory tag,
+        uint256 timestamp,
+        bool hasResponse
     );
-    function getSummary(uint256 agentId, address[] calldata validatorAddresses, bytes32 tag)
+    function getSummary(uint256 agentId, address[] calldata validatorAddresses, string calldata tag)
         external view returns (uint64 count, uint8 avgResponse);
 }
 
@@ -98,8 +99,8 @@ contract SubnetRegistry {
         // Create empty validator array to get all validators' scores
         address[] memory emptyValidators = new address[](0);
 
-        // VLC_PROTOCOL tag in hex
-        bytes32 vlcProtocolTag = 0x564c435f50524f544f434f4c0000000000000000000000000000000000000000;
+        // VLC_PROTOCOL tag (v1.0 - string format)
+        string memory vlcProtocolTag = "VLC_PROTOCOL";
 
         (uint64 totalValidations, uint8 avgScore) = validationRegistry.getSummary(
             minerAgentId,

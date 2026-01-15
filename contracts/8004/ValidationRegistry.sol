@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-interface IIdentityRegistryValidation {
+interface IIdentityRegistry {
     function ownerOf(uint256 tokenId) external view returns (address);
     function isApprovedForAll(address owner, address operator) external view returns (bool);
+    function getApproved(uint256 tokenId) external view returns (address);
 }
 
-/// @notice Minimal, compilable scaffold of ERC-8004 Validation Registry.
-/// - Stores identityRegistry address
-/// - Allows requests & responses, emits events
+/// @title ValidationRegistry - ERC-8004 Validation Registry
+/// @notice Manages validation requests and responses for AI agents
+/// @dev Implements ERC-8004 specification
 contract ValidationRegistry {
     address private immutable identityRegistry;
 
     event ValidationRequest(
         address indexed validatorAddress,
         uint256 indexed agentId,
-        string requestUri,
+        string requestURI,
         bytes32 indexed requestHash
     );
 
@@ -24,22 +25,23 @@ contract ValidationRegistry {
         uint256 indexed agentId,
         bytes32 indexed requestHash,
         uint8 response,
-        string responseUri,
+        string responseURI,
         bytes32 responseHash,
-        bytes32 tag
+        string tag
     );
 
     struct ValidationStatus {
         address validatorAddress;
         uint256 agentId;
-        uint8 response;       // 0..100
+        uint8 response;
         bytes32 responseHash;
-        bytes32 tag;
+        string tag;
         uint256 lastUpdate;
+        bool hasResponse;
     }
 
     // requestHash => validation status
-    mapping(bytes32 => ValidationStatus) public validations;
+    mapping(bytes32 => ValidationStatus) private _validations;
 
     // agentId => list of requestHashes
     mapping(uint256 => bytes32[]) private _agentValidations;
@@ -52,83 +54,120 @@ contract ValidationRegistry {
         identityRegistry = _identityRegistry;
     }
 
+    /// @notice Get the identity registry address
     function getIdentityRegistry() external view returns (address) {
         return identityRegistry;
     }
 
+    /// @notice Request validation for an agent
+    /// @param validatorAddress The address of the validator to perform validation
+    /// @param agentId The agent ID to validate
+    /// @param requestURI URI containing validation request details
+    /// @param requestHash Hash of the request data
     function validationRequest(
         address validatorAddress,
         uint256 agentId,
-        string calldata requestUri,
+        string calldata requestURI,
         bytes32 requestHash
     ) external {
         require(validatorAddress != address(0), "bad validator");
-        require(validations[requestHash].validatorAddress == address(0), "exists");
+        require(_validations[requestHash].validatorAddress == address(0), "exists");
 
         // Check permission: caller must be owner or approved operator
-        IIdentityRegistryValidation registry = IIdentityRegistryValidation(identityRegistry);
+        IIdentityRegistry registry = IIdentityRegistry(identityRegistry);
         address owner = registry.ownerOf(agentId);
         require(
-            msg.sender == owner || registry.isApprovedForAll(owner, msg.sender),
+            msg.sender == owner ||
+            registry.isApprovedForAll(owner, msg.sender) ||
+            registry.getApproved(agentId) == msg.sender,
             "Not authorized"
         );
 
-        validations[requestHash] = ValidationStatus({
+        _validations[requestHash] = ValidationStatus({
             validatorAddress: validatorAddress,
             agentId: agentId,
             response: 0,
             responseHash: bytes32(0),
-            tag: bytes32(0),
-            lastUpdate: block.timestamp
+            tag: "",
+            lastUpdate: block.timestamp,
+            hasResponse: false
         });
 
         // Track for lookups
         _agentValidations[agentId].push(requestHash);
         _validatorRequests[validatorAddress].push(requestHash);
 
-        emit ValidationRequest(validatorAddress, agentId, requestUri, requestHash);
+        emit ValidationRequest(validatorAddress, agentId, requestURI, requestHash);
     }
 
+    /// @notice Submit validation response
+    /// @param requestHash The request hash to respond to
+    /// @param response Validation score (0-100)
+    /// @param responseURI URI containing response details
+    /// @param responseHash Hash of the response data
+    /// @param tag Category tag for the validation
     function validationResponse(
         bytes32 requestHash,
         uint8 response,
-        string calldata responseUri,
+        string calldata responseURI,
         bytes32 responseHash,
-        bytes32 tag
+        string calldata tag
     ) external {
-        ValidationStatus storage s = validations[requestHash];
+        ValidationStatus storage s = _validations[requestHash];
         require(s.validatorAddress != address(0), "unknown");
         require(msg.sender == s.validatorAddress, "not validator");
         require(response <= 100, "resp>100");
+
         s.response = response;
         s.responseHash = responseHash;
         s.tag = tag;
         s.lastUpdate = block.timestamp;
-        emit ValidationResponse(s.validatorAddress, s.agentId, requestHash, response, responseUri, responseHash, tag);
+        s.hasResponse = true;
+
+        emit ValidationResponse(s.validatorAddress, s.agentId, requestHash, response, responseURI, responseHash, tag);
     }
 
+    /// @notice Get validation status for a request
+    /// @param requestHash The request hash to query
     function getValidationStatus(bytes32 requestHash)
         external
         view
-        returns (address validatorAddress, uint256 agentId, uint8 response, bytes32 responseHash, bytes32 tag, uint256 lastUpdate)
+        returns (
+            address validatorAddress,
+            uint256 agentId,
+            uint8 response,
+            bytes32 responseHash,
+            string memory tag,
+            uint256 lastUpdate,
+            bool hasResponse
+        )
     {
-        ValidationStatus memory s = validations[requestHash];
+        ValidationStatus storage s = _validations[requestHash];
         require(s.validatorAddress != address(0), "unknown");
-        return (s.validatorAddress, s.agentId, s.response, s.responseHash, s.tag, s.lastUpdate);
+        return (s.validatorAddress, s.agentId, s.response, s.responseHash, s.tag, s.lastUpdate, s.hasResponse);
     }
 
+    /// @notice Get aggregated validation summary for an agent
+    /// @param agentId The agent ID to query
+    /// @param validatorAddresses Filter by validators (empty = all)
+    /// @param tag Filter by tag (empty = all)
     function getSummary(
         uint256 agentId,
         address[] calldata validatorAddresses,
-        bytes32 tag
+        string calldata tag
     ) external view returns (uint64 count, uint8 avgResponse) {
         uint256 totalResponse = 0;
         count = 0;
 
         bytes32[] storage requestHashes = _agentValidations[agentId];
+        bytes32 tagHash = keccak256(bytes(tag));
+        bool filterTag = bytes(tag).length > 0;
 
         for (uint256 i = 0; i < requestHashes.length; i++) {
-            ValidationStatus storage s = validations[requestHashes[i]];
+            ValidationStatus storage s = _validations[requestHashes[i]];
+
+            // Only count responses that have been submitted
+            if (!s.hasResponse) continue;
 
             // Filter by validator if specified
             bool matchValidator = (validatorAddresses.length == 0);
@@ -141,10 +180,10 @@ contract ValidationRegistry {
                 }
             }
 
-            // Filter by tag (0x0 means no filter)
-            bool matchTag = (tag == bytes32(0)) || (s.tag == tag);
+            // Filter by tag
+            bool matchTag = !filterTag || (keccak256(bytes(s.tag)) == tagHash);
 
-            if (matchValidator && matchTag && s.response >= 0) {
+            if (matchValidator && matchTag) {
                 totalResponse += s.response;
                 count++;
             }
@@ -153,11 +192,21 @@ contract ValidationRegistry {
         avgResponse = count > 0 ? uint8(totalResponse / count) : 0;
     }
 
+    /// @notice Get all validation request hashes for an agent
+    /// @param agentId The agent ID to query
     function getAgentValidations(uint256 agentId) external view returns (bytes32[] memory) {
         return _agentValidations[agentId];
     }
 
+    /// @notice Get all validation request hashes for a validator
+    /// @param validatorAddress The validator address to query
     function getValidatorRequests(address validatorAddress) external view returns (bytes32[] memory) {
         return _validatorRequests[validatorAddress];
+    }
+
+    /// @notice Get contract version
+    /// @return Version string
+    function getVersion() external pure returns (string memory) {
+        return "1.0.0";
     }
 }

@@ -12,7 +12,6 @@ package demo
 
 import (
 	"fmt"
-	"math/big"
 	"os"
 	"strconv"
 	"time"
@@ -194,11 +193,8 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 			chainIDValue, // Use environment chain ID or default
 		)
 		if err != nil {
-			fmt.Printf("⚠️  Reputation system initialization failed: %v\n", err)
-			fmt.Println("   Continuing without reputation feedback...")
+			fmt.Printf("⚠️  Reputation init failed: %v\n", err)
 			reputationMgr = nil
-		} else {
-			fmt.Println("✅ Reputation feedback auth generation initialized")
 		}
 
 		// Initialize reputation batch submitter (client-side)
@@ -212,11 +208,7 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 			reputationRegistryAddr := common.HexToAddress(reputationRegistryAddrStr)
 
 			// Initialize TaskIndexCounter from blockchain to prevent IndexLimit errors
-			err = reputationMgr.InitializeFromBlockchain(rpcURL, reputationRegistryAddr)
-			if err != nil {
-				fmt.Printf("⚠️  Failed to initialize from blockchain: %v\n", err)
-				fmt.Println("   Continuing with TaskIndexCounter = 0...")
-			}
+			_ = reputationMgr.InitializeFromBlockchain(rpcURL, reputationRegistryAddr)
 
 			// Get client key from environment or fallback to Sepolia
 			clientKey := os.Getenv("CLIENT_KEY")
@@ -231,21 +223,14 @@ func NewDemoCoordinator(subnetID string) *DemoCoordinator {
 				chainIDValue, // Use environment chain ID or default
 			)
 			if err != nil {
-				fmt.Printf("⚠️  Reputation batch submitter initialization failed: %v\n", err)
-				fmt.Println("   Continuing without batch submission...")
+				fmt.Printf("⚠️  Batch submitter failed: %v\n", err)
 				reputationSubmitter = nil
 			} else {
 				reputationSubmitter = submitter
-				fmt.Println("✅ Reputation batch submitter initialized")
 			}
 		}
 		reputationManager = reputationMgr
 	} else {
-		if validationOnlyMode {
-			fmt.Println("⏭️  Skipping reputation system initialization (validation-only mode)")
-		} else {
-			fmt.Println("⏭️  Skipping reputation system initialization (subnet-only mode)")
-		}
 		reputationManager = nil
 		reputationSubmitter = nil
 	}
@@ -340,7 +325,7 @@ func (dc *DemoCoordinator) RunVLCValidation() bool {
 
 // RunDemo executes the complete demo scenario using the separated core/demo architecture
 func (dc *DemoCoordinator) RunDemo() {
-	fmt.Printf("=== Starting Demo with Refactored Architecture ===\n")
+	fmt.Printf("\n\n=== Starting Demo ===\n")
 	fmt.Printf("Subnet ID: %s\n", dc.SubnetID)
 	fmt.Printf("Miner: %s\n", dc.Miner.ID)
 	fmt.Printf("Validators: ")
@@ -356,6 +341,18 @@ func (dc *DemoCoordinator) RunDemo() {
 		dc.processInput(inputNum, dc.userInputs[inputNum-1])
 		fmt.Println()
 		time.Sleep(1 * time.Second) // Small delay for readability
+	}
+
+	// Submit ALL feedback to blockchain at the very end (after all epochs)
+	if dc.ReputationMgr != nil && dc.ReputationSubmitter != nil {
+		allTasks := dc.ReputationMgr.GetAllTaskResults()
+		if len(allTasks) > 0 {
+			fmt.Printf("\n⭐ Submitting %d feedbacks to ReputationRegistry...\n", len(allTasks))
+			err := dc.ReputationSubmitter.SubmitAllFeedback(dc.ReputationMgr.AgentID, allTasks, "hetu.subnet1.org/flux-mining")
+			if err != nil {
+				fmt.Printf("⚠️  Feedback failed: %v\n", err)
+			}
+		}
 	}
 
 	// Print final summary
@@ -387,7 +384,7 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 	// Use timestamp to ensure unique request IDs across runs
 	requestID := fmt.Sprintf("req-%s-%d-%d", dc.SubnetID, inputNumber, time.Now().Unix())
 
-	fmt.Printf("User Input: %s\n", input)
+	fmt.Printf("User Intent: %s\n", input)
 
 	// *** ROUND START: User input (no VLC increment - user is external) ***
 	uiValidator := dc.Validators[0] // Validator-1 is the round orchestrator
@@ -397,87 +394,57 @@ func (dc *DemoCoordinator) processInput(inputNumber int, input string) {
 	// Track user input that starts the round
 	userInputEventID := dc.GraphAdapter.TrackUserInput(requestID, input, uiValidator.GetLastMinerClock(), "")
 
-	// *** x402 PAYMENT REQUEST: Agent generates payment request for client ***
+	// *** x402 PAYMENT HANDLING ***
 	var paymentRequest *subnet.PaymentRequest
+	totalTasks := 7 // Total tasks in demo
+
 	if dc.PaymentCoord != nil {
-		// Get miner/agent address from environment or fallback to Sepolia
+		// Get addresses from environment
 		agentAddrStr := os.Getenv("MINER_ADDRESS")
 		if agentAddrStr == "" {
-			agentAddrStr = "0x86cDAb16A19602F74E4fFB996baD70307105a3A3" // Sepolia miner address
+			agentAddrStr = "0x86cDAb16A19602F74E4fFB996baD70307105a3A3"
 		}
-		agentAddr := common.HexToAddress(agentAddrStr)
-		paymentRequest = dc.PaymentCoord.GeneratePaymentRequest(requestID, agentAddr)
-
-		fmt.Printf("\n📋 Agent sends x402 Payment Request to Client:\n")
-		fmt.Printf("   Task ID: %s\n", paymentRequest.TaskID)
-		fmt.Printf("   Amount: %s wei (10 %s)\n", paymentRequest.Amount, paymentRequest.Asset.Symbol)
-		fmt.Printf("   Agent: %s\n", paymentRequest.Agent.Address)
-		fmt.Printf("   Payment Token (%s): %s\n", paymentRequest.Asset.Symbol, paymentRequest.Asset.Contract)
-		// Only show escrow details if not in direct mode
-		if dc.PaymentCoord.GetPaymentMode() != "direct" {
-			fmt.Printf("   Escrow Contract: %s\n", paymentRequest.Escrow.Contract)
-			fmt.Printf("   Deadline: %d seconds\n", paymentRequest.Escrow.Timeout)
-		}
-		fmt.Println()
-	}
-
-	// *** PAYMENT PROCESSING: Client receives payment request and processes payment ***
-	if dc.PaymentCoord != nil && paymentRequest != nil {
-		fmt.Printf("💳 Client receives payment request and initiates payment...\n")
-
-		// Get client address from environment or fallback to Sepolia
 		clientAddrStr := os.Getenv("CLIENT_ADDRESS")
 		if clientAddrStr == "" {
-			clientAddrStr = "0xfA6EC9Cf1E293A91a8ea2EdCc4A2324d48129821" // Sepolia client with USDC
+			clientAddrStr = "0xfA6EC9Cf1E293A91a8ea2EdCc4A2324d48129821"
 		}
+		agentAddr := common.HexToAddress(agentAddrStr)
 		clientAddr := common.HexToAddress(clientAddrStr)
-		agentAddr := common.HexToAddress(paymentRequest.Agent.Address)
-		paymentAmount := new(big.Int)
-		paymentAmount.SetString(paymentRequest.Amount, 10)
 
-		// Check if we should use facilitator service
-		if dc.PaymentCoord.UseFacilitator() {
-			fmt.Printf("📡 Using x402 Facilitator for payment processing...\n")
+		// SESSION MODE: Handle session payments (per-epoch)
+		if dc.PaymentCoord.IsSessionMode() {
+			epochNumber := dc.PaymentCoord.GetEpochForTask(inputNumber)
+			isStandalone := dc.PaymentCoord.IsStandaloneTask(inputNumber, totalTasks)
 
-			// Get payment scheme from facilitator
-			scheme, err := dc.PaymentCoord.GetPaymentScheme()
-			if err != nil {
-				fmt.Printf("⚠️  Failed to get payment scheme: %v\n", err)
-				scheme = "escrow" // Default to escrow
-			}
-
-			fmt.Printf("   Payment scheme: %s\n", scheme)
-
-			// Settle payment through facilitator
-			err = dc.PaymentCoord.SettlePaymentWithFacilitator(
-				requestID,
-				clientAddr,
-				agentAddr,
-				paymentRequest.Amount,
-				scheme,
-			)
-			if err != nil {
-				fmt.Printf("⚠️  Failed to settle payment via facilitator: %v\n", err)
+			if isStandalone {
+				// Task 7: Standalone per-task payment
+				fmt.Printf("\n💳 Standalone Task %d (outside complete epochs) - Per-task payment\n", inputNumber)
+				paymentRequest = dc.PaymentCoord.GeneratePaymentRequest(requestID, agentAddr)
+				dc.processPerTaskPayment(requestID, clientAddr, agentAddr, paymentRequest)
+			} else {
+				// Tasks 1-6: Session-based payments
+				if dc.PaymentCoord.ShouldStartSession(inputNumber) {
+					// Start new session at beginning of epoch
+					err := dc.PaymentCoord.StartSession(epochNumber, clientAddr, agentAddr)
+					if err != nil {
+						fmt.Printf("⚠️  Failed to start session %d: %v\n", epochNumber, err)
+					}
+				}
+				// Track task in session
+				dc.PaymentCoord.AddTaskToSession(epochNumber, requestID)
 			}
 		} else {
-			// Fallback to direct escrow deposit (old method)
-			fmt.Printf("📝 Using direct escrow deposit (no facilitator)...\n")
+			// PER-TASK MODE: Original behavior
+			paymentRequest = dc.PaymentCoord.GeneratePaymentRequest(requestID, agentAddr)
 
-			// Get client private key from environment or fallback to Sepolia
-			clientPrivateKey := os.Getenv("CLIENT_KEY")
-			if clientPrivateKey == "" {
-				clientPrivateKey = "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97" // Sepolia client key
-			}
-			err := dc.PaymentCoord.DepositPaymentWithClientSignature(
-				requestID,
-				clientAddr,
-				agentAddr,
-				paymentAmount,
-				clientPrivateKey,
-			)
-			if err != nil {
-				fmt.Printf("⚠️  Failed to deposit payment to escrow: %v\n", err)
-			}
+			fmt.Printf("\n📋 Agent sends x402 Payment Request to Client:\n")
+			fmt.Printf("   Task ID: %s\n", paymentRequest.TaskID)
+			fmt.Printf("   Amount: %s wei (10 %s)\n", paymentRequest.Amount, paymentRequest.Asset.Symbol)
+			fmt.Printf("   Agent: %s\n", paymentRequest.Agent.Address)
+			fmt.Printf("   Payment Token (%s): %s\n", paymentRequest.Asset.Symbol, paymentRequest.Asset.Contract)
+			fmt.Println()
+
+			dc.processPerTaskPayment(requestID, clientAddr, agentAddr, paymentRequest)
 		}
 	}
 
@@ -569,44 +536,37 @@ func (dc *DemoCoordinator) handleInfoRequest(inputNumber int, originalInput stri
 
 // validateVLCSequenceFromMiner validates miner's VLC sequence across all validators
 func (dc *DemoCoordinator) validateVLCSequenceFromMiner(minerResponse *subnet.MinerResponseMessage) {
-	fmt.Printf("🔗🔐 Validators validating Miner/Agent VLC sequence (local verification)...\n")
-
 	// Each validator independently validates miner's VLC sequence
-	// Only Validator-1 maintains VLC state, others just validate the sequence
 	allValid := true
+	validCount := 0
 	for i, validator := range dc.Validators {
 		if i == 0 {
 			// Validator-1 (UI) - full VLC participant
-			if !validator.ValidateSequence(minerResponse.VLCClock, 1) { // Miner ID = 1
-				fmt.Printf("ERROR: Miner VLC validation failed for %s\n", validator.ID)
+			if validator.ValidateSequence(minerResponse.VLCClock, 1) {
+				validCount++
+			} else {
 				allValid = false
 			}
 		} else {
-			// Other validators - just check VLC format validity (simplified check)
-			if minerResponse.VLCClock == nil || len(minerResponse.VLCClock.Values) == 0 {
-				fmt.Printf("ERROR: Invalid VLC format for %s\n", validator.ID)
-				allValid = false
+			// Other validators - just check VLC format validity
+			if minerResponse.VLCClock != nil && len(minerResponse.VLCClock.Values) > 0 {
+				validCount++
 			} else {
-				fmt.Printf("Validator %s: VLC format check passed\n", validator.ID)
+				allValid = false
 			}
 		}
 	}
 
 	if allValid {
-		fmt.Printf("Miner VLC validation: PASSED\n")
+		fmt.Printf("🔗 VLC validated by %d/%d validators\n", validCount, len(dc.Validators))
 	} else {
-		fmt.Printf("Miner VLC validation: FAILED\n")
+		fmt.Printf("⚠️  VLC validation failed (%d/%d)\n", validCount, len(dc.Validators))
 	}
 }
 
 // validateVLCSequenceFromValidator validates validator-1's VLC operations
 func (dc *DemoCoordinator) validateVLCSequenceFromValidator(validatorClock *vlc.Clock) {
-	fmt.Printf("Miner validating Validator-1 VLC sequence...\n")
-
-	// Miner validates validator's VLC operations
-	// This maintains bidirectional VLC consistency
 	dc.Miner.UpdateValidatorClock(validatorClock)
-	fmt.Printf("Validator-1 VLC validation: PASSED (miner synchronized)\n")
 }
 
 // handleNormalOutput processes normal miner output through VLC validation and quality consensus
@@ -648,46 +608,38 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 	var userFeedback string
 	var finalResult string
 
+	// Count accepts/rejects from votes
+	acceptCount := 0
+	for _, v := range votes {
+		if v.Accept {
+			acceptCount++
+		}
+	}
+
 	if sharedAssessment.IsAccepted() {
-		consensusResult = fmt.Sprintf("ACCEPTED (%.2f/%.2f weight)", sharedAssessment.AcceptVotes, sharedAssessment.TotalWeight)
-		fmt.Printf("Validator consensus: %s\n", consensusResult)
+		consensusResult = fmt.Sprintf("ACCEPTED (%d/%d validators)", acceptCount, len(votes))
+		fmt.Printf("✓ Consensus: %s\n", consensusResult)
 
 		// Step 6: Simulate user feedback using UI validator
 		userAccepts, userFeedback = uiValidator.SimulateUserInteraction(inputNumber, minerResponse.Output)
-		fmt.Printf("User feedback: %s\n", userFeedback)
+		fmt.Printf("✓ User: %s\n", userFeedback)
 
 		if userAccepts {
-			finalResult = "OUTPUT DELIVERED TO USER"
+			finalResult = "DELIVERED"
 		} else {
-			finalResult = "OUTPUT REJECTED BY USER (despite validator acceptance)"
+			finalResult = "USER REJECTED"
 		}
 	} else {
-		consensusResult = fmt.Sprintf("REJECTED (%.2f/%.2f weight)", sharedAssessment.AcceptVotes, sharedAssessment.TotalWeight)
-		fmt.Printf("Validator consensus: %s\n", consensusResult)
+		consensusResult = fmt.Sprintf("REJECTED (%d/%d validators)", acceptCount, len(votes))
+		fmt.Printf("✗ Consensus: %s\n", consensusResult)
 
 		userAccepts = false
 		userFeedback = "No user feedback (validator rejection)"
-		finalResult = "OUTPUT REJECTED BY VALIDATORS"
+		finalResult = "VALIDATOR REJECTED"
 	}
 
-	// *** PAYMENT FINALIZATION: Process payment based on consensus + user acceptance ***
-	if dc.PaymentCoord != nil {
-		qualityScore := sharedAssessment.AcceptVotes / sharedAssessment.TotalWeight
-		err := uiValidator.FinalizePayment(
-			minerResponse.RequestID,
-			sharedAssessment.IsAccepted(),
-			userAccepts,
-			qualityScore,
-		)
-		if err != nil {
-			fmt.Printf("⚠️  Payment finalization error: %v\n", err)
-		}
-	}
-
-	// *** ROUND END: NO VLC increment (no message to/from miner, just user delivery) ***
-	// User is external to subnet, so no VLC increment
-	fmt.Printf("Round %d: Completed by Validator-1 aggregating final result\n", inputNumber)
-	fmt.Printf("Final result: %s\n", finalResult)
+	// *** ROUND END ***
+	fmt.Printf("→ Round %d: %s\n", inputNumber, finalResult)
 
 	// *** REPUTATION: Generate FeedbackAuth BEFORE epoch submission ***
 	// This ensures feedback is included in the epoch data
@@ -702,6 +654,54 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 			fmt.Printf("⚠️  Failed to generate FeedbackAuth: %v\n", err)
 		}
 	}
+
+	// *** PAYMENT FINALIZATION: Process payment AFTER round completes ***
+	if dc.PaymentCoord != nil {
+		qualityScore := sharedAssessment.AcceptVotes / sharedAssessment.TotalWeight
+		totalTasks := 7
+		taskApproved := sharedAssessment.IsAccepted() && userAccepts
+
+		if dc.PaymentCoord.IsSessionMode() {
+			epochNumber := dc.PaymentCoord.GetEpochForTask(inputNumber)
+			isStandalone := dc.PaymentCoord.IsStandaloneTask(inputNumber, totalTasks)
+
+			if isStandalone {
+				// Standalone task (task 7): Per-task finalization
+				err := uiValidator.FinalizePayment(
+					minerResponse.RequestID,
+					sharedAssessment.IsAccepted(),
+					userAccepts,
+					qualityScore,
+				)
+				if err != nil {
+					fmt.Printf("⚠️  Payment finalization error: %v\n", err)
+				}
+			} else {
+				// Session task: Update session metrics, finalize at end of epoch
+				dc.PaymentCoord.UpdateSessionTaskResult(epochNumber, taskApproved, qualityScore)
+				if dc.PaymentCoord.ShouldFinalizeSession(inputNumber) {
+					err := dc.PaymentCoord.FinalizeSession(epochNumber)
+					if err != nil {
+						fmt.Printf("⚠️  Session finalization error: %v\n", err)
+					}
+				}
+			}
+		} else {
+			// Per-task mode: Finalize after round completes
+			err := uiValidator.FinalizePayment(
+				minerResponse.RequestID,
+				sharedAssessment.IsAccepted(),
+				userAccepts,
+				qualityScore,
+			)
+			if err != nil {
+				fmt.Printf("⚠️  Payment finalization error: %v\n", err)
+			}
+		}
+	}
+
+	// Sync miner with final validator state before round completion
+	dc.Miner.UpdateValidatorClock(uiValidator.GetLastMinerClock())
 
 	// Track comprehensive round completion with all actions in one VLC mutation
 	// NOTE: This may trigger epoch submission if this is the 3rd round
@@ -718,27 +718,13 @@ func (dc *DemoCoordinator) handleNormalOutput(inputNumber int, minerResponse *su
 
 	// Check if epoch is complete (every 3 tasks) - AFTER TrackRoundComplete
 	if dc.ReputationMgr != nil && dc.ReputationMgr.IsEpochComplete() {
-		fmt.Printf("\n📊 Epoch %d Complete! Ready for batch feedback submission\n", dc.ReputationMgr.CurrentEpoch)
-		dc.ReputationMgr.PrintEpochSummary(dc.ReputationMgr.CurrentEpoch)
+		fmt.Printf("\n📊 Epoch %d Complete!\n", dc.ReputationMgr.CurrentEpoch)
 
-		// Automatically submit batch feedback to blockchain
-		if dc.ReputationSubmitter != nil {
-			tasks := dc.ReputationMgr.GetCurrentEpochFeedbacks()
-			err := dc.ReputationSubmitter.SubmitEpochFeedback(dc.ReputationMgr.AgentID, tasks)
-			if err != nil {
-				fmt.Printf("⚠️  Failed to submit epoch feedback: %v\n", err)
-			}
-		}
-
-		// Start next epoch
+		// Start next epoch (feedback will be submitted at the very end)
 		if inputNumber < 7 { // More tasks remaining
 			dc.ReputationMgr.StartNextEpoch()
 		}
 	}
-
-	// Sync miner with final validator state
-	dc.Miner.UpdateValidatorClock(uiValidator.GetLastMinerClock())
-	fmt.Printf("Round %d: VLC synchronization complete\n", inputNumber)
 }
 
 // printSummary prints the final state of the subnet
@@ -753,13 +739,32 @@ func (dc *DemoCoordinator) printSummary() {
 		fmt.Printf("  %s: Last miner clock = %v\n", validator.ID, validatorClock.Values)
 	}
 
-	fmt.Printf("\nProcessed inputs summary:\n")
-	processedInputs := dc.Miner.GetProcessedInputs()
-	for i := 1; i <= 7; i++ {
-		if response, exists := processedInputs[i]; exists {
-			fmt.Printf("  Input %d: Clock=%v, Type=%s\n", i, response.VLCClock.Values, response.OutputType)
-		}
+	// Print session payment summary if in session mode
+	if dc.PaymentCoord != nil && dc.PaymentCoord.IsSessionMode() {
+		dc.PaymentCoord.PrintSessionSummary()
+	}
+}
+
+// processPerTaskPayment handles per-task payment via x402 facilitator
+func (dc *DemoCoordinator) processPerTaskPayment(requestID string, clientAddr, agentAddr common.Address, paymentRequest *subnet.PaymentRequest) {
+	if paymentRequest == nil {
+		return
 	}
 
-	fmt.Printf("\nDemo completed successfully with refactored architecture!\n")
+	fmt.Printf("💳 Client receives payment request and initiates payment...\n")
+	fmt.Printf("📡 Using x402 Facilitator for payment processing...\n")
+
+	scheme, _ := dc.PaymentCoord.GetPaymentScheme()
+	fmt.Printf("   Payment scheme: %s\n", scheme)
+
+	err := dc.PaymentCoord.SettlePaymentWithFacilitator(
+		requestID,
+		clientAddr,
+		agentAddr,
+		paymentRequest.Amount,
+		scheme,
+	)
+	if err != nil {
+		fmt.Printf("⚠️  Failed to settle payment via facilitator: %v\n", err)
+	}
 }
