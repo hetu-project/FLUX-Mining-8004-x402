@@ -11,6 +11,7 @@ import (
 	"crypto/ecdsa"
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
 	"time"
 
@@ -53,12 +54,18 @@ func NewReputationFeedbackManager(
 	identityRegistryAddr common.Address,
 	chainID uint64,
 ) (*ReputationFeedbackManager, error) {
+	// Endpoint is the service URI where the agent can be reached
+	endpoint := os.Getenv("AGENT_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "https://hetu.subnet1.org/flux-mining"
+	}
+
 	return &ReputationFeedbackManager{
 		AgentID:          big.NewInt(int64(agentID)),
 		ClientAddress:    clientAddress,
 		IdentityRegistry: identityRegistryAddr,
 		ChainID:          big.NewInt(int64(chainID)),
-		Endpoint:         "hetu.subnet1.org/flux-mining",
+		Endpoint:         endpoint,
 		TaskResults:      make([]TaskResult, 0, 7),
 		CurrentEpoch:     1,
 	}, nil
@@ -317,7 +324,6 @@ func (rbs *ReputationBatchSubmitter) SubmitAllFeedback(
 	tasks []TaskResult,
 	endpoint string,
 ) error {
-
 	successCount := 0
 	for i, task := range tasks {
 		fmt.Printf("📝 Task %d (%s): ", task.TaskNumber, task.TaskID[:20]+"...")
@@ -329,17 +335,19 @@ func (rbs *ReputationBatchSubmitter) SubmitAllFeedback(
 			tag2 = "failed"
 		}
 
+		// Use intent causal graph SVG as feedbackURI
+		feedbackURI := "https://coffee-defiant-raccoon-829.mypinata.cloud/ipfs/bafkreid4ud4ihbwgsxtnc7hkivef6whnqbrzzpncul3r3wxsvi4onjyl64"
+
 		txHash, err := rbs.submitSingleFeedback(
 			agentID,
 			score,
 			tag1,
 			tag2,
 			endpoint,
-			task.TaskID, // feedbackURI = taskID
+			feedbackURI,
 		)
 		if err != nil {
 			fmt.Printf("❌ Failed - %v\n", err)
-			// Continue with other tasks
 			continue
 		}
 
@@ -375,10 +383,15 @@ func (rbs *ReputationBatchSubmitter) SubmitEpochFeedback(
 			Timestamp:    t.Timestamp,
 		}
 	}
-	return rbs.SubmitAllFeedback(agentID, results, "hetu.subnet1.org/flux-mining")
+	// Endpoint is the service URI where the agent can be reached
+	endpoint := os.Getenv("AGENT_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "https://hetu.subnet1.org/flux-mining"
+	}
+	return rbs.SubmitAllFeedback(agentID, results, endpoint)
 }
 
-// submitSingleFeedback submits a single feedback transaction (v1.0 - no feedbackAuth)
+// submitSingleFeedback submits a single feedback transaction (v2.0 - int256 value with decimals)
 func (rbs *ReputationBatchSubmitter) submitSingleFeedback(
 	agentID *big.Int,
 	score uint8,
@@ -386,11 +399,12 @@ func (rbs *ReputationBatchSubmitter) submitSingleFeedback(
 	endpoint string,
 	feedbackURI string,
 ) (string, error) {
-	// New ABI for v1.0 (string tags, endpoint, no feedbackAuth)
+	// ABI for v2.0 (int256 value, uint8 valueDecimals)
 	reputationABI := `[{
 		"inputs": [
 			{"internalType": "uint256", "name": "agentId", "type": "uint256"},
-			{"internalType": "uint8", "name": "score", "type": "uint8"},
+			{"internalType": "int256", "name": "value", "type": "int256"},
+			{"internalType": "uint8", "name": "valueDecimals", "type": "uint8"},
 			{"internalType": "string", "name": "tag1", "type": "string"},
 			{"internalType": "string", "name": "tag2", "type": "string"},
 			{"internalType": "string", "name": "endpoint", "type": "string"},
@@ -411,10 +425,16 @@ func (rbs *ReputationBatchSubmitter) submitSingleFeedback(
 	// Generate feedbackHash from taskID
 	feedbackHash := crypto.Keccak256Hash([]byte(feedbackURI))
 
+	// Convert score (0-100) to int256 value with 0 decimals
+	// Score 90 -> value 90, decimals 0
+	value := big.NewInt(int64(score))
+	valueDecimals := uint8(0)
+
 	data, err := parsedABI.Pack(
 		"giveFeedback",
 		agentID,
-		score,
+		value,
+		valueDecimals,
 		tag1,
 		tag2,
 		endpoint,
@@ -470,7 +490,7 @@ func (rbs *ReputationBatchSubmitter) submitSingleFeedback(
 
 // GetAgentReputationSummary reads agent's reputation from blockchain
 func (rbs *ReputationBatchSubmitter) GetAgentReputationSummary(agentID *big.Int) error {
-	// Updated ABI for v1.0 (string tags)
+	// Updated ABI for v2.0 (int256 summaryValue, uint8 summaryValueDecimals)
 	reputationABI := `[{
 		"inputs": [
 			{"internalType": "uint256", "name": "agentId", "type": "uint256"},
@@ -481,7 +501,8 @@ func (rbs *ReputationBatchSubmitter) GetAgentReputationSummary(agentID *big.Int)
 		"name": "getSummary",
 		"outputs": [
 			{"internalType": "uint64", "name": "count", "type": "uint64"},
-			{"internalType": "uint8", "name": "averageScore", "type": "uint8"}
+			{"internalType": "int256", "name": "summaryValue", "type": "int256"},
+			{"internalType": "uint8", "name": "summaryValueDecimals", "type": "uint8"}
 		],
 		"stateMutability": "view",
 		"type": "function"
@@ -514,10 +535,21 @@ func (rbs *ReputationBatchSubmitter) GetAgentReputationSummary(agentID *big.Int)
 	}
 
 	var count uint64
-	var averageScore uint8
-	if len(results) >= 2 {
+	var summaryValue *big.Int
+	var summaryValueDecimals uint8
+	if len(results) >= 3 {
 		count = results[0].(uint64)
-		averageScore = results[1].(uint8)
+		summaryValue = results[1].(*big.Int)
+		summaryValueDecimals = results[2].(uint8)
+	}
+
+	// Calculate average score from summaryValue
+	// If decimals=0, summaryValue is the sum of all scores
+	// Average = summaryValue / count
+	var averageScore int64 = 0
+	if count > 0 && summaryValue != nil {
+		avgBig := new(big.Int).Div(summaryValue, big.NewInt(int64(count)))
+		averageScore = avgBig.Int64()
 	}
 
 	fmt.Printf("\n╔══════════════════════════════════════════════════════════════╗\n")
@@ -529,6 +561,7 @@ func (rbs *ReputationBatchSubmitter) GetAgentReputationSummary(agentID *big.Int)
 
 	if count > 0 {
 		fmt.Printf("  📝 Total Feedbacks: %d\n", count)
+		fmt.Printf("  📈 Total Score: %s (decimals: %d)\n", summaryValue.String(), summaryValueDecimals)
 		fmt.Printf("  ⭐ Average Score: %d/100", averageScore)
 
 		if averageScore >= 80 {
@@ -543,6 +576,12 @@ func (rbs *ReputationBatchSubmitter) GetAgentReputationSummary(agentID *big.Int)
 
 		barLength := 50
 		filledLength := int(averageScore) * barLength / 100
+		if filledLength < 0 {
+			filledLength = 0
+		}
+		if filledLength > barLength {
+			filledLength = barLength
+		}
 		bar := strings.Repeat("█", filledLength) + strings.Repeat("░", barLength-filledLength)
 		fmt.Printf("  📊 [%s] %d%%\n", bar, averageScore)
 	} else {

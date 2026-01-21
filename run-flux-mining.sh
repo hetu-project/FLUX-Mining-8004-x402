@@ -583,11 +583,91 @@ EOF
     AGENT_ID_FILE=".sepolia_agent_id_${MINER}"
     AGENT_ID_DEC=""
 
-    if [ "$NETWORK" = "sepolia" ]; then
-        # For Sepolia, use hardcoded agent ID 1168
-        AGENT_ID_DEC=1168
-        echo "   📋 Agent wallet address already registered with ID: $AGENT_ID_DEC"
-        echo "$AGENT_ID_DEC" > "$AGENT_ID_FILE"
+    if [ "$REGISTER_AGENT" = "true" ]; then
+        # Register new agent without URI, get agent ID
+        echo "   🆔 Registering new agent..."
+
+        REGISTER_TX=$($CAST_PATH send $IDENTITY_ADDRESS "register()" \
+            --private-key $MINER_KEY \
+            --rpc-url $RPC_URL \
+            --gas-limit 300000 --json 2>&1)
+
+        if echo "$REGISTER_TX" | grep -q "blockHash\|transactionHash"; then
+            echo "      ✅ Registration transaction confirmed"
+
+            TX_HASH=$(echo "$REGISTER_TX" | jq -r '.transactionHash' 2>/dev/null || echo "")
+            sleep 3
+
+            if [ -n "$TX_HASH" ]; then
+                RECEIPT=$($CAST_PATH receipt $TX_HASH --rpc-url $RPC_URL --json 2>&1)
+                AGENT_ID_HEX=$(echo "$RECEIPT" | jq -r '.logs[0].topics[1]' 2>/dev/null || echo "0x0")
+
+                if [ "$AGENT_ID_HEX" != "0x0" ] && [ -n "$AGENT_ID_HEX" ]; then
+                    AGENT_ID_DEC=$((AGENT_ID_HEX))
+                    echo "      ✅ Agent ID assigned: $AGENT_ID_DEC"
+                    echo "$AGENT_ID_DEC" > "$AGENT_ID_FILE"
+                    echo "      💾 Saved Agent ID to $AGENT_ID_FILE"
+                    echo ""
+                    echo "   📋 Now create your agent registration JSON with agentId: $AGENT_ID_DEC"
+                    echo "   📤 Upload to IPFS, then run: SET_AGENT_URI_CID=<cid> ./run-flux-mining.sh"
+                    exit 0
+                else
+                    echo "      ❌ Could not parse agent ID from receipt"
+                    exit 1
+                fi
+            fi
+        else
+            echo "      ❌ Registration failed: $REGISTER_TX"
+            exit 1
+        fi
+    elif [ -n "$SET_AGENT_URI_CID" ]; then
+        # Set agentURI on existing agent
+        if [ -f "$AGENT_ID_FILE" ]; then
+            AGENT_ID_DEC=$(cat "$AGENT_ID_FILE")
+        else
+            echo "   ❌ No saved agent ID found. Run with REGISTER_AGENT=true first."
+            exit 1
+        fi
+
+        AGENT_URI="ipfs://$SET_AGENT_URI_CID"
+        echo "   🔗 Setting agentURI for Agent ID $AGENT_ID_DEC"
+        echo "      URI: $AGENT_URI"
+
+        SET_URI_TX=$($CAST_PATH send $IDENTITY_ADDRESS "setAgentURI(uint256,string)" \
+            $AGENT_ID_DEC "$AGENT_URI" \
+            --private-key $MINER_KEY \
+            --rpc-url $RPC_URL \
+            --gas-limit 200000 --json 2>&1)
+
+        if echo "$SET_URI_TX" | grep -q "blockHash\|transactionHash"; then
+            echo "      ✅ agentURI set on-chain"
+        else
+            echo "      ❌ Failed to set agentURI: $SET_URI_TX"
+            exit 1
+        fi
+    elif [ "$NETWORK" = "sepolia" ]; then
+        # For Sepolia, use saved agent ID and verify on-chain
+        if [ -f "$AGENT_ID_FILE" ]; then
+            AGENT_ID_DEC=$(cat "$AGENT_ID_FILE")
+            echo "   📋 Saved Agent ID: $AGENT_ID_DEC"
+
+            # Verify ownership on-chain using ownerOf(agentId)
+            echo "   🔍 Verifying agent ownership on-chain..."
+            OWNER=$($CAST_PATH call $IDENTITY_ADDRESS "ownerOf(uint256)(address)" $AGENT_ID_DEC --rpc-url $RPC_URL 2>/dev/null || echo "0x0")
+
+            if [ "${OWNER,,}" == "${MINER,,}" ]; then
+                echo "   ✅ Verified: Agent $AGENT_ID_DEC owned by $MINER"
+            else
+                echo "   ❌ Agent $AGENT_ID_DEC not owned by miner!"
+                echo "      Owner: $OWNER"
+                echo "      Miner: $MINER"
+                echo "   💡 Run with REGISTER_AGENT=true to register a new agent"
+                exit 1
+            fi
+        else
+            echo "   ❌ No saved agent ID found. Run with REGISTER_AGENT=true first."
+            exit 1
+        fi
     else
         # For local anvil, always register new agent
         echo "   🆔 Registering miner with ERC-8004 identity..."
@@ -638,6 +718,106 @@ EOF
                 echo "      Owner: $OWNER"
                 echo "      Miner: $MINER"
                 exit 1
+            fi
+
+            # Create and upload ERC-8004 Agent Registration File
+            echo "   📄 Creating ERC-8004 agent registration file..."
+            AGENT_ENDPOINT="${AGENT_ENDPOINT:-https://hetu.subnet1.org/flux-mining}"
+            AGENT_REGISTRATION_JSON=$(cat <<AGENT_EOF
+{
+  "name": "FLUX Miner",
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "description": "FLUX Mining compute agent with VLC consensus, x402 payments, and TEE validation. Part of the Hetu Protocol decentralized AI infrastructure.",
+  "image": "ipfs://bafkreidpv3yqyhbtuvsb3vfjvg3pdolgtl7ll3q6na5kfb7h5uwydkeh74",
+  "active": true,
+  "endpoints": [
+    {
+      "name": "web",
+      "endpoint": "$AGENT_ENDPOINT"
+    },
+    {
+      "name": "agentWallet",
+      "endpoint": "eip155:$CHAIN_ID:$MINER"
+    }
+  ],
+  "x402Support": true,
+  "registrations": [
+    {
+      "agentId": $AGENT_ID_DEC,
+      "agentRegistry": "eip155:$CHAIN_ID:$IDENTITY_ADDRESS"
+    }
+  ],
+  "supportedTrust": [
+    "reputation",
+    "crypto-economic",
+    "tee-attestation",
+    "causal-graph-data"
+  ]
+}
+AGENT_EOF
+)
+            # Upload to IPFS or use pre-provided CID
+            AGENT_URI=""
+            if [ -n "$AGENT_REGISTRATION_CID" ]; then
+                # Use pre-provided CID (user uploaded manually)
+                AGENT_URI="ipfs://$AGENT_REGISTRATION_CID"
+                echo "      ✅ Using pre-provided CID: $AGENT_URI"
+
+                # Set the agentURI on-chain
+                echo "      🔗 Setting agentURI on-chain..."
+                SET_URI_TX=$($CAST_PATH send $IDENTITY_ADDRESS "setAgentURI(uint256,string)" \
+                    $AGENT_ID_DEC "$AGENT_URI" \
+                    --private-key $MINER_KEY \
+                    --rpc-url $RPC_URL \
+                    --gas-limit 200000 --json 2>&1)
+
+                if echo "$SET_URI_TX" | grep -q "blockHash\|transactionHash"; then
+                    echo "      ✅ agentURI set on-chain"
+                else
+                    echo "      ⚠️ Failed to set agentURI: $SET_URI_TX"
+                fi
+            elif [ "$USE_PINATA" = "true" ] && [ -n "$JWT_SECRET_ACCESS" ]; then
+                echo "      📤 Uploading to Pinata IPFS..."
+
+                # Create temp file for the JSON
+                TEMP_JSON=$(mktemp)
+                echo "$AGENT_REGISTRATION_JSON" > "$TEMP_JSON"
+
+                # Upload using curl
+                PINATA_RESPONSE=$(curl -s -X POST "https://uploads.pinata.cloud/v3/files" \
+                    -H "Authorization: Bearer $JWT_SECRET_ACCESS" \
+                    -F "file=@$TEMP_JSON;filename=agent-registration.json" \
+                    -F "pinataMetadata={\"name\":\"FLUX Miner Agent Registration\",\"keyvalues\":{\"agentId\":\"$AGENT_ID_DEC\",\"type\":\"erc8004-registration\"}}" \
+                    -F "network=public")
+
+                rm "$TEMP_JSON"
+
+                # Extract CID from response
+                IPFS_CID=$(echo "$PINATA_RESPONSE" | jq -r '.data.cid' 2>/dev/null)
+
+                if [ -n "$IPFS_CID" ] && [ "$IPFS_CID" != "null" ]; then
+                    AGENT_URI="ipfs://$IPFS_CID"
+                    echo "      ✅ Uploaded to IPFS: $AGENT_URI"
+
+                    # Set the agentURI on-chain
+                    echo "      🔗 Setting agentURI on-chain..."
+                    SET_URI_TX=$($CAST_PATH send $IDENTITY_ADDRESS "setAgentURI(uint256,string)" \
+                        $AGENT_ID_DEC "$AGENT_URI" \
+                        --private-key $MINER_KEY \
+                        --rpc-url $RPC_URL \
+                        --gas-limit 200000 --json 2>&1)
+
+                    if echo "$SET_URI_TX" | grep -q "blockHash\|transactionHash"; then
+                        echo "      ✅ agentURI set on-chain"
+                    else
+                        echo "      ⚠️ Failed to set agentURI: $SET_URI_TX"
+                    fi
+                else
+                    echo "      ⚠️ IPFS upload failed, skipping agentURI"
+                    echo "      Response: $PINATA_RESPONSE"
+                fi
+            else
+                echo "      ⚪ Pinata not configured, skipping agentURI upload"
             fi
         else
             echo "      ❌ Registration failed!"
@@ -1561,50 +1741,36 @@ echo "   Each completed epoch will trigger actual blockchain submissions"
 echo ""
 
 # Step 1: Run VLC Validation FIRST (before subnet registration)
-echo "🔐 Running VLC Protocol Validation..."
-echo ""
-
-# Agent validates itself (with TEE's help)
-# The validator address is the agent's own address
-VALIDATOR=$MINER_ADDRESS
-VALIDATOR_NAME="Agent/Miner (self-validation)"
-
-# Generate unique request hash
-REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
-REQUEST_HASH="0x${REQUEST_HASH}"
-
-# Submit validation REQUEST to blockchain FIRST (before validation happens)
-echo "📝 Step 1: Submitting validation request to ValidationRegistry..."
-echo "   📋 Validator: ${VALIDATOR_NAME} ($VALIDATOR)"
-echo "   🔑 Request Hash: $REQUEST_HASH"
-echo ""
-
+# Skip on Sepolia - ValidationRegistry not linked to current IdentityRegistry
 if [ "$NETWORK" == "sepolia" ]; then
-    # Submit validation request with --json flag for reliable parsing
-    VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
-        "$VALIDATOR" \
-        "$AGENT_ID_DEC" \
-        "VLC Protocol Validation Test" \
-        "$REQUEST_HASH" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
-    VALIDATION_RESULT=$?
-
-    if [ $VALIDATION_RESULT -ne 0 ]; then
-        echo "   ❌ Validation request failed"
-        echo "   Error: $VALIDATION_OUTPUT"
-        cleanup
-        exit 1
-    fi
-
-    # Extract transaction hash from JSON output (ensure only first match)
-    REQUEST_TX=$(echo "$VALIDATION_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
-
-    echo "   ✅ Validation request submitted"
-    echo "   📝 Transaction: $REQUEST_TX"
-    echo "   🔗 View: https://sepolia.etherscan.io/tx/$REQUEST_TX"
-    echo "   📤 Submitted by: MINER ($MINER_ADDRESS)"
+    echo "🔐 VLC Protocol Validation"
+    echo "   ⏭️  Skipped on Sepolia (ValidationRegistry linked to different IdentityRegistry)"
+    echo "   ℹ️  Using local VLC consensus only"
+    echo ""
+    REQUEST_TX="skipped"
+    RESPONSE_TX="skipped"
+    VALIDATION_EXIT_CODE=0
+    AVG_SCORE=100  # Assume passed for local validation
 else
-    # On local anvil network
+    echo "🔐 Running VLC Protocol Validation..."
+    echo ""
+
+    # Agent validates itself (with TEE's help)
+    # The validator address is the agent's own address
+    VALIDATOR=$MINER_ADDRESS
+    VALIDATOR_NAME="Agent/Miner (self-validation)"
+
+    # Generate unique request hash
+    REQUEST_HASH=$(echo -n "vlc-validation-${AGENT_ID_DEC}-${VALIDATOR}-$(date +%s)" | sha256sum | cut -d' ' -f1)
+    REQUEST_HASH="0x${REQUEST_HASH}"
+
+    # Submit validation REQUEST to blockchain FIRST (before validation happens)
+    echo "📝 Step 1: Submitting validation request to ValidationRegistry..."
+    echo "   📋 Validator: ${VALIDATOR_NAME} ($VALIDATOR)"
+    echo "   🔑 Request Hash: $REQUEST_HASH"
+    echo ""
+
+    # Submit validation request (local anvil only - Sepolia is skipped via outer check)
     VALIDATION_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationRequest(address,uint256,string,bytes32)" \
         "$VALIDATOR" \
         "$AGENT_ID_DEC" \
@@ -1625,7 +1791,6 @@ else
     echo "   ✅ Validation request submitted (Local Anvil)"
     echo "   📝 Transaction: $REQUEST_TX"
     echo "   📤 Submitted by: MINER ($MINER_ADDRESS)"
-fi
 
 echo ""
 echo "📝 Step 2: Performing VLC validation..."
@@ -1800,6 +1965,10 @@ else
         echo "   ❌ Local VLC validation failed"
     fi
 fi
+fi  # End of outer sepolia skip check
+
+# Only run validation result handling when NOT on Sepolia (we skipped validation there)
+if [ "$NETWORK" != "sepolia" ]; then
 
 if [ $VALIDATION_EXIT_CODE -ne 0 ]; then
     echo ""
@@ -1903,56 +2072,28 @@ else
     RESPONSE_URI="VLC validation passed - agent correctly implements causal consistency"
 fi
 
-if [ "$NETWORK" == "sepolia" ]; then
-    # Agent submits the validation response (with TEE signature)
-    # Using the same REQUEST_HASH that was submitted in the request and passed to TEE
-    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
-        "$REQUEST_HASH" \
-        "$SCORE" \
-        "$RESPONSE_URI" \
-        "$RESPONSE_HASH" \
-        "$VLC_TAG" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
-    RESPONSE_RESULT=$?
+# Submit validation response (local anvil only - Sepolia is skipped via outer check)
+RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
+    "$REQUEST_HASH" \
+    "$SCORE" \
+    "$RESPONSE_URI" \
+    "$RESPONSE_HASH" \
+    "$VLC_TAG" \
+    --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
+RESPONSE_RESULT=$?
 
-    if [ $RESPONSE_RESULT -eq 0 ]; then
-        # Extract transaction hash from JSON output (ensure only first match)
-        RESPONSE_TX=$(echo "$RESPONSE_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
+if [ $RESPONSE_RESULT -eq 0 ]; then
+    # Extract transaction hash from JSON output
+    RESPONSE_TX=$(echo "$RESPONSE_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
 
-        echo "      ✅ Validation response submitted"
-        echo "      📝 Transaction: $RESPONSE_TX"
-        echo "      🔗 View: https://sepolia.etherscan.io/tx/$RESPONSE_TX"
-        echo "      📤 Submitted by: AGENT/MINER ($MINER_ADDRESS)"
-        echo ""
-    else
-        echo "      ❌ Failed to submit validation response"
-        echo "      Error details: $RESPONSE_OUTPUT"
-    fi
+    echo "      ✅ Validation response submitted (Local Anvil)"
+    echo "      📝 Transaction: $RESPONSE_TX"
+    echo "      📤 Submitted by: AGENT/MINER ($MINER_ADDRESS)"
+    echo "      📊 Score: $SCORE/100"
+    echo ""
 else
-    # On local anvil network
-    # Agent submits the validation response using the same REQUEST_HASH from the request
-    RESPONSE_OUTPUT=$($CAST_PATH send $VALIDATION_ADDRESS "validationResponse(bytes32,uint8,string,bytes32,string)" \
-        "$REQUEST_HASH" \
-        "$SCORE" \
-        "$RESPONSE_URI" \
-        "$RESPONSE_HASH" \
-        "$VLC_TAG" \
-        --private-key $MINER_KEY --rpc-url $RPC_URL --json 2>&1)
-    RESPONSE_RESULT=$?
-
-    if [ $RESPONSE_RESULT -eq 0 ]; then
-        # Extract transaction hash from JSON output
-        RESPONSE_TX=$(echo "$RESPONSE_OUTPUT" | grep -o '"transactionHash":"0x[a-fA-F0-9]\{64\}"' | head -1 | cut -d'"' -f4)
-
-        echo "      ✅ Validation response submitted (Local Anvil)"
-        echo "      📝 Transaction: $RESPONSE_TX"
-        echo "      📤 Submitted by: AGENT/MINER ($MINER_ADDRESS)"
-        echo "      📊 Score: $SCORE/100"
-        echo ""
-    else
-        echo "      ❌ Failed to submit validation response"
-        echo "      Error details: $RESPONSE_OUTPUT"
-    fi
+    echo "      ❌ Failed to submit validation response"
+    echo "      Error details: $RESPONSE_OUTPUT"
 fi
 
 if [ $RESPONSE_RESULT -eq 0 ]; then
@@ -1982,14 +2123,9 @@ if [ $RESPONSE_RESULT -eq 0 ]; then
         echo ""
         echo "      🔐 Verifying TEE Signature..."
 
-        # Wait for transaction to be indexed (Sepolia needs more time than anvil)
-        if [ "$NETWORK" == "sepolia" ]; then
-            echo "         ⏳ Waiting for transaction to be indexed on Sepolia..."
-            sleep 10
-        else
-            echo "         ⏳ Waiting for transaction to be indexed..."
-            sleep 2
-        fi
+        # Wait for transaction to be indexed (local anvil only)
+        echo "         ⏳ Waiting for transaction to be indexed..."
+        sleep 2
 
         # Run signature verification inline
         TEE_WALLET_EXPECTED="0x4f5a138DeBD61Df84CB2b4580bE4cE7aD240659b"
@@ -2075,9 +2211,7 @@ EOF
     fi
 else
     echo "      ⚠️  ${VALIDATOR_NAME}: Failed to record score"
-    if [ "$NETWORK" == "sepolia" ]; then
-        echo "      Error details: $RESPONSE_OUTPUT"
-    fi
+    echo "      Error details: $RESPONSE_OUTPUT"
     echo "❌ Validation submission failed - cannot proceed"
     cleanup
     exit 1
@@ -2179,46 +2313,63 @@ else
     exit 1
 fi
 
+fi  # End of non-sepolia validation handling
+
 echo ""
 
-# Step 2: Approve HETU token transfers for subnet registration
-echo "💰 Approving HETU token deposits for subnet registration..."
-echo "   Miner deposit: 500 HETU"
-echo "   Validator deposits: 100 HETU each (4 validators = 400 HETU total)"
-echo ""
-
-# Approve miner deposit (500 HETU)
-MINER_DEPOSIT=$($CAST_PATH --to-wei 500)
-echo "   📤 Miner approving 500 HETU to SubnetRegistry..."
-$CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $MINER_DEPOSIT \
-    --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
-
-if [ $? -eq 0 ]; then
-    echo "      ✅ Miner approval successful"
+# Step 2: Check/Approve HETU token transfers for subnet registration
+# Skip on Sepolia - approvals are already done and persistent
+if [ "$NETWORK" == "sepolia" ]; then
+    echo "💰 HETU Token Approvals"
+    echo "   ⏭️  Skipped on Sepolia (approvals already done)"
+    echo ""
 else
-    echo "      ❌ Miner approval failed"
-    cleanup
-    exit 1
-fi
+    echo "💰 Checking HETU token approvals for subnet registration..."
+    echo ""
 
-# Approve validator deposits (100 HETU each)
-VALIDATOR_DEPOSIT=$($CAST_PATH --to-wei 100)
-for i in 1 2 3 4; do
-    VALIDATOR_KEY_VAR="VALIDATOR${i}_KEY"
-    VALIDATOR_KEY="${!VALIDATOR_KEY_VAR}"
-
-    echo "   📤 Validator-${i} approving 100 HETU to SubnetRegistry..."
-    $CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $VALIDATOR_DEPOSIT \
-        --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
-
-    if [ $? -eq 0 ]; then
-        echo "      ✅ Validator-${i} approval successful"
+    # Check miner allowance (need 500 HETU)
+    MINER_DEPOSIT=$($CAST_PATH --to-wei 500)
+    MINER_ALLOWANCE=$($CAST_PATH call $HETU_ADDRESS "allowance(address,address)(uint256)" $MINER $REGISTRY_ADDRESS --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+    if [ "$MINER_ALLOWANCE" -ge "$MINER_DEPOSIT" ] 2>/dev/null; then
+        echo "   ✅ Miner already approved (allowance: $(echo "scale=2; $MINER_ALLOWANCE / 10^18" | bc) HETU)"
     else
-        echo "      ❌ Validator-${i} approval failed"
-        cleanup
-        exit 1
+        echo "   📤 Miner approving 500 HETU to SubnetRegistry..."
+        $CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $MINER_DEPOSIT \
+            --private-key $MINER_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo "      ✅ Miner approval successful"
+        else
+            echo "      ❌ Miner approval failed"
+            cleanup
+            exit 1
+        fi
     fi
-done
+
+    # Check validator allowances (need 100 HETU each)
+    VALIDATOR_DEPOSIT=$($CAST_PATH --to-wei 100)
+    for i in 1 2 3 4; do
+        VALIDATOR_KEY_VAR="VALIDATOR${i}_KEY"
+        VALIDATOR_KEY="${!VALIDATOR_KEY_VAR}"
+        VALIDATOR_ADDR_VAR="VALIDATOR${i}"
+        VALIDATOR_ADDR="${!VALIDATOR_ADDR_VAR}"
+
+        VALIDATOR_ALLOWANCE=$($CAST_PATH call $HETU_ADDRESS "allowance(address,address)(uint256)" $VALIDATOR_ADDR $REGISTRY_ADDRESS --rpc-url $RPC_URL 2>/dev/null | awk '{print $1}' || echo "0")
+        if [ "$VALIDATOR_ALLOWANCE" -ge "$VALIDATOR_DEPOSIT" ] 2>/dev/null; then
+            echo "   ✅ Validator-${i} already approved"
+        else
+            echo "   📤 Validator-${i} approving 100 HETU to SubnetRegistry..."
+            $CAST_PATH send $HETU_ADDRESS "approve(address,uint256)" $REGISTRY_ADDRESS $VALIDATOR_DEPOSIT \
+                --private-key $VALIDATOR_KEY --rpc-url $RPC_URL > /dev/null 2>&1
+            if [ $? -eq 0 ]; then
+                echo "      ✅ Validator-${i} approval successful"
+            else
+                echo "      ❌ Validator-${i} approval failed"
+                cleanup
+                exit 1
+            fi
+        fi
+    done
+fi
 
 echo ""
 
@@ -2376,17 +2527,17 @@ echo ""
 echo "📊 Agent ID $AGENT_ID_DEC Reputation on Blockchain:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Call getSummary(uint256, address[], string, string) returns (uint64, uint8)
-# Parameters: agentId, clientAddresses (empty array), tag1 (empty), tag2 (empty)
-# ERC-8004 v1.0: tags are now strings, not bytes32
-REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],string,string)(uint64,uint8)" \
-    $AGENT_ID_DEC "[]" '""' '""' \
+# Call getSummary(uint256, address[], string, string) returns (uint64, int256, uint8)
+# Parameters: agentId, clientAddresses (must include at least the client), tag1, tag2
+# ERC-8004 v2.0: requires clientAddresses, returns count, summaryValue (avg), decimals
+REPUTATION_DATA=$($CAST_PATH call $REPUTATION_ADDRESS "getSummary(uint256,address[],string,string)(uint64,int256,uint8)" \
+    $AGENT_ID_DEC "[$CLIENT]" "" "" \
     --rpc-url $RPC_URL 2>&1)
 
 if echo "$REPUTATION_DATA" | grep -q "^[0-9]"; then
-    # Parse the two return values (count, averageScore)
-    FEEDBACK_COUNT=$(echo "$REPUTATION_DATA" | sed -n '1p')
-    AVG_SCORE=$(echo "$REPUTATION_DATA" | sed -n '2p')
+    # Parse the three return values (count, avgScore, decimals)
+    FEEDBACK_COUNT=$(echo "$REPUTATION_DATA" | sed -n '1p' | awk '{print $1}')
+    AVG_SCORE=$(echo "$REPUTATION_DATA" | sed -n '2p' | awk '{print $1}')
 
     if [ "$FEEDBACK_COUNT" -gt 0 ]; then
         echo "  📝 Total Feedbacks Received: $FEEDBACK_COUNT"

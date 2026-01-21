@@ -114,11 +114,11 @@ FLUX Mining enables **Intelligence Money** through permissionless agentic coordi
 
 ### Key Features
 
-✅ **ERC-8004 Identity System** - NFT-based agent identities
+✅ **ERC-8004 v2.0 Identity System** - NFT-based agent identities
 ✅ **VLC Protocol Validation** - Ensures causal consistency (TEE-enabled with Intel TDX)
 ✅ **x402 Payment Protocol** - HTTP-based payment standard (direct/session)
 ✅ **BFT Consensus** - Byzantine fault-tolerant quality assessment
-✅ **Reputation Tracking** - On-chain performance history
+✅ **Reputation Tracking** - On-chain performance feedback
 ✅ **IPFS Storage (Optional)** - 95% cost reduction via Pinata
 
 ## 📋 System Overview
@@ -254,8 +254,8 @@ TEE_VALIDATOR_ENDPOINT=<tee-url>   # EigenCompute TEE validator endpoint
 ## 🔗 Integrations & Support
 
 ### Protocol Standards
-- **ERC-8004 Standard**:
-  - Identity Registry: NFT-based agent identities
+- **ERC-8004 v2.0 Standard**:
+  - Identity Registry: NFT-based agent identities with metadata storage
   - Validation Registry: VLC protocol scores (≥70 required)
   - Reputation Registry: On-chain feedback records
 - **x402 Payment Protocol**:
@@ -268,11 +268,11 @@ TEE_VALIDATOR_ENDPOINT=<tee-url>   # EigenCompute TEE validator endpoint
 - **Ethereum-Sepolia**: Public testnet with pre-deployed contracts
 
 ### Verifiability Layers
-- **Identity & Validation**: ERC-8004 NFTs with VLC protocol compliance
+- **Identity & Validation**: ERC-8004 v2.0 NFTs with VLC protocol compliance
 - **TEE Validation (Optional)**: Hardware-guaranteed validation with Intel TDX secure enclaves
 - **Payment Verification**: On-chain escrow with BFT consensus
 - **Causal Graph**: Vector Logical Clock tracking via Dgraph + IPFS
-- **Reputation Records**: Immutable on-chain feedback with FeedbackAuth
+- **Reputation Records**: Immutable on-chain feedback
 
 ## 🤝 Contributing
 

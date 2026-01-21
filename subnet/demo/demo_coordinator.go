@@ -348,7 +348,12 @@ func (dc *DemoCoordinator) RunDemo() {
 		allTasks := dc.ReputationMgr.GetAllTaskResults()
 		if len(allTasks) > 0 {
 			fmt.Printf("\n⭐ Submitting %d feedbacks to ReputationRegistry...\n", len(allTasks))
-			err := dc.ReputationSubmitter.SubmitAllFeedback(dc.ReputationMgr.AgentID, allTasks, "hetu.subnet1.org/flux-mining")
+			// Endpoint is the service URI where the agent can be reached
+			endpoint := os.Getenv("AGENT_ENDPOINT")
+			if endpoint == "" {
+				endpoint = "https://hetu.subnet1.org/flux-mining"
+			}
+			err := dc.ReputationSubmitter.SubmitAllFeedback(dc.ReputationMgr.AgentID, allTasks, endpoint)
 			if err != nil {
 				fmt.Printf("⚠️  Feedback failed: %v\n", err)
 			}

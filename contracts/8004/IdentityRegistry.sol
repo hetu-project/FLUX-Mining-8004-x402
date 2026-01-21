@@ -7,9 +7,9 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
-/// @title IdentityRegistry - ERC-8004 Agent Identity Registry
+/// @title IdentityRegistry - ERC-8004 Agent Identity Registry v2.0
 /// @notice Manages decentralized AI agent identities as ERC-721 tokens
-/// @dev Implements ERC-8004 specification with EIP-712 signature verification
+/// @dev Implements ERC-8004 specification v2.0 with EIP-712 signature verification
 contract IdentityRegistry is ERC721URIStorage, Ownable, EIP712 {
     uint256 private _lastId;
 
@@ -125,12 +125,16 @@ contract IdentityRegistry is ERC721URIStorage, Ownable, EIP712 {
         emit URIUpdated(agentId, newURI, msg.sender);
     }
 
-    /// @notice Get the verified wallet address for an agent
+    /// @notice Get the verified wallet for an agent (v2.0 - returns bytes)
     /// @param agentId The agent ID
-    /// @return The verified wallet address
-    function getAgentWallet(uint256 agentId) external view returns (address) {
+    /// @return The verified wallet as bytes (empty if not set)
+    function getAgentWallet(uint256 agentId) external view returns (bytes memory) {
         ownerOf(agentId); // Ensure token exists
-        return _agentWallet[agentId];
+        address wallet = _agentWallet[agentId];
+        if (wallet == address(0)) {
+            return "";
+        }
+        return abi.encodePacked(wallet);
     }
 
     /// @notice Set a verified wallet for an agent using EIP-712 signature
@@ -184,9 +188,9 @@ contract IdentityRegistry is ERC721URIStorage, Ownable, EIP712 {
         emit AgentWalletSet(agentId, newWallet, msg.sender);
     }
 
-    /// @notice Clear agent wallet (only owner/approved can call)
+    /// @notice Unset agent wallet (only owner/approved can call)
     /// @param agentId The agent ID
-    function clearAgentWallet(uint256 agentId) external {
+    function unsetAgentWallet(uint256 agentId) external {
         address owner = ownerOf(agentId);
         require(
             msg.sender == owner ||
@@ -221,7 +225,7 @@ contract IdentityRegistry is ERC721URIStorage, Ownable, EIP712 {
     /// @notice Get contract version
     /// @return Version string
     function getVersion() external pure returns (string memory) {
-        return "1.0.0";
+        return "2.0.0";
     }
 
     /// @notice Get the next agent ID that will be assigned
